@@ -10,7 +10,7 @@ import pyqtgraph as pg
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QKeyEvent
 from PyQt5.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFrame,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
     QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow,
     QPushButton, QSlider, QSplitter, QVBoxLayout, QWidget,
 )
@@ -703,12 +703,24 @@ class MainWindow(QMainWindow):
 
 # ── entry point ───────────────────────────────────────────────────────────────
 
-def run(parent_dir: Path = DEFAULT_PARENT_DIR,
+def run(parent_dir: Path | None = None,
         data_dir:   Path = DEFAULT_DATA_DIR,
-        output:     Path = DEFAULT_PATH):
+        output:     Path | None = None):
     pg.setConfigOptions(background="w", foreground="k",
                         antialias=False, useOpenGL=False)
     app = QApplication.instance() or QApplication(sys.argv)
+
+    if parent_dir is None:
+        start = str(DEFAULT_PARENT_DIR) if DEFAULT_PARENT_DIR.exists() else str(Path.home())
+        chosen = QFileDialog.getExistingDirectory(
+            None, "Select session data folder", start)
+        if not chosen:
+            sys.exit(0)   # user cancelled
+        parent_dir = Path(chosen)
+
+    if output is None:
+        output = parent_dir / "curation.csv"
+
     win = MainWindow(parent_dir=parent_dir, data_dir=data_dir, output_path=output)
     win.show()
     sys.exit(app.exec_())
