@@ -526,6 +526,7 @@ class MainWindow(QMainWindow):
         self._session_data = None
         self._curation_df  = load_curation(self.output_path)
         self._agg_metrics  = aggregate_metrics(str(self.parent_dir))
+        self._capture_dir: Path | None = None   # resolved lazily; None = use default
 
         self._build_ui()
         self._wire_signals()
@@ -703,17 +704,56 @@ class MainWindow(QMainWindow):
         self._save()
         self._next_roi()
 
+    def _resolve_capture_dir(self) -> Path | None:
+        """Return a writable captures directory for this session.
+
+        Uses the default (beside the curation CSV) if writable; otherwise
+        prompts the user once and caches the choice for the rest of the session.
+        """
+        if self._capture_dir is not None:
+            return self._capture_dir
+
+        default = self.output_path.parent / "captures"
+        try:
+            default.mkdir(parents=True, exist_ok=True)
+            probe = default / ".write_probe"
+            probe.touch()
+            probe.unlink()
+            self._capture_dir = default
+            return self._capture_dir
+        except (PermissionError, OSError):
+            pass
+
+        # Default is read-only — ask the user for an alternative
+        chosen = QFileDialog.getExistingDirectory(
+            self,
+            "Capture folder is read-only — choose a save directory",
+            str(Path.home()),
+        )
+        if not chosen:
+            self.status_label.setText("Capture cancelled.")
+            return None
+        p = Path(chosen)
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.status_label.setText(f"Cannot use folder: {exc}")
+            return None
+        self._capture_dir = p
+        return self._capture_dir
+
     def _capture(self):
         import datetime
+        out = self._resolve_capture_dir()
+        if out is None:
+            return
         sd = self._session_data
         tag = ""
         if sd is not None:
             row = sd.rois.iloc[self._roi_idx]
             tag = (f"_{sd.session_key}_{row['plane_id']}"
                    f"_cell{int(row['cell_roi_id'])}")
-        ts  = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out = self.output_path.parent / "captures"
-        out.mkdir(parents=True, exist_ok=True)
+        ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         path = out / f"capture{tag}_{ts}.png"
         self.grab().save(str(path))
         self.status_label.setText(f"Saved: {path.name}")
