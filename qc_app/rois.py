@@ -1,43 +1,40 @@
-"""FOV image and ROI mask loading from extraction h5 files."""
+"""FOV image and ROI mask loading from per-session per-plane npy/pkl files."""
 
 from __future__ import annotations
 
+import pickle
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-import h5py
 import numpy as np
-import sparse
+import pandas as pd
 
 
 @dataclass
 class PlaneAssets:
     plane_id: str
-    fov: np.ndarray        # (H, W) float32
-    masks: np.ndarray      # (n_rois, H, W) bool
-    cell_roi_ids: np.ndarray
+    max_img:   np.ndarray    # (H, W) float32
+    mean_img:  np.ndarray    # (H, W) float32
+    roi_table: pd.DataFrame  # columns: cell_roi_id, mask_matrix, ...
 
 
 @lru_cache(maxsize=64)
-def load_plane_assets(plane_path_str: str) -> PlaneAssets:
-    plane_path = Path(plane_path_str)
-    plane_id = plane_path.name
-    h5_path = plane_path / "extraction" / f"{plane_id}_extraction.h5"
-    with h5py.File(h5_path, "r") as h:
-        fov = h["maxImg"][:]
-        coords = h["rois"]["coords"][:]
-        data   = h["rois"]["data"][:]
-        shape  = tuple(h["rois"]["shape"][:])
-    masks = sparse.COO(coords, data, shape).todense() > 0
-    return PlaneAssets(plane_id=plane_id, fov=fov.astype(np.float32),
-                       masks=masks, cell_roi_ids=np.arange(masks.shape[0]))
+def load_plane_assets(session_path_str: str, plane_id: str) -> PlaneAssets:
+    p = Path(session_path_str)
+    max_img  = np.load(p / f"{plane_id}_max_img.npy").astype(np.float32)
+    mean_img = np.load(p / f"{plane_id}_mean_img.npy").astype(np.float32)
+    with open(p / f"{plane_id}_roi_table.pkl", "rb") as fh:
+        roi_table = pickle.load(fh)
+    return PlaneAssets(plane_id=plane_id, max_img=max_img,
+                       mean_img=mean_img, roi_table=roi_table)
 
 
 def get_roi_mask(plane: PlaneAssets, cell_roi_id: int) -> np.ndarray:
-    if cell_roi_id < 0 or cell_roi_id >= len(plane.masks):
-        raise IndexError(f"cell_roi_id {cell_roi_id} out of range")
-    return plane.masks[cell_roi_id]
+    rows = plane.roi_table[plane.roi_table["cell_roi_id"] == cell_roi_id]
+    if rows.empty:
+        raise IndexError(f"cell_roi_id {cell_roi_id} not in plane {plane.plane_id}")
+    return rows.iloc[0]["mask_matrix"].astype(bool)
 
 
 def crop_around_mask(fov: np.ndarray, mask: np.ndarray,

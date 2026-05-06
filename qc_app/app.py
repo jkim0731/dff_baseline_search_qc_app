@@ -18,7 +18,7 @@ from PyQt5.QtWidgets import (
 from .curation import DEFAULT_PATH, derive_category, load_curation, lookup_decision, save_decision
 from .data import (
     DEFAULT_DATA_DIR, DEFAULT_PARENT_DIR, aggregate_metrics,
-    find_processed_dir, list_sessions, load_session,
+    list_sessions, load_session,
 )
 from .rois import crop_around_mask, get_roi_mask, load_plane_assets, normalize_for_display
 
@@ -29,8 +29,13 @@ BASELINE_COLORS = {
     "F0trend": "#ff7f0e",
     "F0":      "#d62728",
 }
-DFF_COLORS = {"short": "#1f77b4", "long": "#2ca02c"}
-DFF_DASHED = {"F0trend": (Qt.DashLine, "F0trend"), "F0": (Qt.DotLine, "F0")}
+DFF_COLORS = {
+    "short":   "#1f77b4",
+    "long":    "#2ca02c",
+    "F0trend": "#ff7f0e",   # same orange as F baseline
+    "F0":      "#d62728",   # same red as F baseline
+}
+TRACE_KEYS  = ["short", "long", "F0trend", "F0"]   # order matches keys 1-4
 METRIC_NAMES = ["noise", "snr", "bleaching", "sustained", "skewness"]
 MASK_COLOR = (255, 32, 32, 110)   # RGBA
 
@@ -48,10 +53,20 @@ def _make_pen(color, width=1, style=Qt.SolidLine):
     return pen
 
 
+# ── custom ViewBox: scroll → X zoom only; Shift+scroll → Y zoom only ─────────
+
+class _ShiftYViewBox(pg.ViewBox):
+    def wheelEvent(self, ev, axis=None):
+        if ev.modifiers() & Qt.ShiftModifier:
+            super().wheelEvent(ev, axis=1)   # Y only
+        else:
+            super().wheelEvent(ev, axis=0)   # X only
+
+
 # ── trace panel ───────────────────────────────────────────────────────────────
 
 class TracePanel(QWidget):
-    """Vertically stacked F + dFF pyqtgraph plots with linked X axis."""
+    """F + dFF plots with external legend row and shared trace toggles."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -59,27 +74,76 @@ class TracePanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
 
-        self.f_plot   = pg.PlotWidget(title="Corrected F + baselines")
-        self.dff_plot = pg.PlotWidget(title="dFF")
+        # ── legend row ────────────────────────────────────────────────────────
+        legend_row = QHBoxLayout()
+        legend_row.setSpacing(4)
+        self._legend_btns: dict[str, QPushButton] = {}
+
+        # static "F" label
+        f_lbl = QLabel("F")
+        f_lbl.setStyleSheet("color:#222; font-size:9pt; font-weight:bold;")
+        legend_row.addWidget(f_lbl)
+
+        for i, name in enumerate(TRACE_KEYS, start=1):
+            r, g, b = _pg_color(BASELINE_COLORS[name])
+            luma = 0.299 * r + 0.587 * g + 0.114 * b
+            txt = "white" if luma < 160 else "black"
+            btn = QPushButton(f"{i}:{name}")
+            btn.setCheckable(True)
+            btn.setChecked(True)
+            btn.setFixedHeight(18)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: rgb({r},{g},{b}); color: {txt};
+                    border: none; padding: 1px 7px; font-size: 9pt;
+                    border-radius: 3px;
+                }}
+                QPushButton:!checked {{
+                    background: #ccc; color: #999;
+                }}
+            """)
+            btn.toggled.connect(lambda checked, n=name: self._on_toggle(n, checked))
+            self._legend_btns[name] = btn
+            legend_row.addWidget(btn)
+
+        legend_row.addStretch()
+        legend_row.addWidget(QLabel("dFF α:"))
+        self._alpha_sl = QSlider(Qt.Horizontal)
+        self._alpha_sl.setRange(10, 100)
+        self._alpha_sl.setValue(70)
+        self._alpha_sl.setFixedWidth(70)
+        self._alpha_sl.setFixedHeight(16)
+        self._alpha_sl.valueChanged.connect(self._on_alpha_changed)
+        legend_row.addWidget(self._alpha_sl)
+        self._home_btn = QPushButton("Home")
+        self._home_btn.setFixedHeight(18)
+        self._home_btn.clicked.connect(self._home)
+        legend_row.addWidget(self._home_btn)
+        layout.addLayout(legend_row)
+
+        # ── plots ─────────────────────────────────────────────────────────────
+        self.f_plot   = pg.PlotWidget(viewBox=_ShiftYViewBox(),
+                                      title="Corrected F + baselines")
+        self.dff_plot = pg.PlotWidget(viewBox=_ShiftYViewBox(), title="dFF")
         self.dff_plot.setXLink(self.f_plot)
 
         for pw in (self.f_plot, self.dff_plot):
             pw.setLabel("bottom", "time (s)")
-            pw.addLegend(offset=(5, 5), labelTextSize="8pt")
             pw.showGrid(x=False, y=True, alpha=0.2)
             pw.setDownsampling(auto=True, mode="peak")
             pw.setClipToView(True)
 
         self.f_plot.setLabel("left", "F")
         self.dff_plot.setLabel("left", "dFF")
-        self.f_plot.setMinimumHeight(280)
-        self.dff_plot.setMinimumHeight(200)
+        self.f_plot.setMinimumHeight(220)
+        self.dff_plot.setMinimumHeight(160)
 
         layout.addWidget(self.f_plot,   stretch=4)
         layout.addWidget(self.dff_plot, stretch=3)
 
         self._f_curves:   dict[str, pg.PlotDataItem] = {}
         self._dff_curves: dict[str, pg.PlotDataItem] = {}
+        self._dff_alpha = 178   # 70 / 100 * 255
 
     def init_curves(self):
         self.f_plot.clear()
@@ -87,20 +151,43 @@ class TracePanel(QWidget):
         self._f_curves = {}
         self._dff_curves = {}
 
-        self._f_curves["F"] = self.f_plot.plot(
-            pen=_make_pen("#222", width=1), name="F")
+        self._f_curves["F"] = self.f_plot.plot(pen=_make_pen("#222", width=1))
 
         for name, color in BASELINE_COLORS.items():
             self._f_curves[name] = self.f_plot.plot(
-                pen=_make_pen(_pg_color(color), width=2), name=name)
+                pen=_make_pen(_pg_color(color), width=2))
+
+        zero = pg.InfiniteLine(pos=0, angle=0,
+                               pen=pg.mkPen(color=(180, 180, 180), width=1,
+                                            style=Qt.DashLine))
+        self.dff_plot.addItem(zero)
 
         for name, color in DFF_COLORS.items():
-            self._dff_curves[name] = self.dff_plot.plot(
-                pen=_make_pen(_pg_color(color), width=1), name=f"dFF ({name})")
+            r, g, b = _pg_color(color)
+            curve = self.dff_plot.plot(
+                pen=_make_pen((r, g, b, self._dff_alpha), width=1))
+            self._dff_curves[name] = curve
 
-        for name, (style, label) in DFF_DASHED.items():
-            self._dff_curves[name] = self.dff_plot.plot(
-                pen=_make_pen("#000", width=1.5, style=style), name=f"dFF ({label})")
+    def toggle_trace(self, name: str):
+        """Toggle a named trace in both plots (driven by button or key press)."""
+        btn = self._legend_btns.get(name)
+        if btn:
+            btn.setChecked(not btn.isChecked())
+
+    def _on_toggle(self, name: str, checked: bool):
+        for curves in (self._f_curves, self._dff_curves):
+            if name in curves:
+                curves[name].setVisible(checked)
+
+    def _on_alpha_changed(self, value: int):
+        self._dff_alpha = int(value / 100 * 255)
+        for name, curve in self._dff_curves.items():
+            r, g, b = _pg_color(DFF_COLORS[name])
+            curve.setPen(_make_pen((r, g, b, self._dff_alpha), width=1))
+
+    def _home(self):
+        self.f_plot.autoRange()
+        self.dff_plot.autoRange()
 
     def update(self, timestamps, F, baselines, dffs):
         self._f_curves["F"].setData(timestamps, F)
@@ -115,7 +202,7 @@ class TracePanel(QWidget):
 # ── image panel ───────────────────────────────────────────────────────────────
 
 class ImagePanel(QWidget):
-    """FOV + mask overlay with contrast controls."""
+    """FOV + mask overlay with contrast, mean/max, zoom/FOV controls."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -125,10 +212,15 @@ class ImagePanel(QWidget):
 
         # controls row
         ctrl = QHBoxLayout()
-        self.mode_btn  = QPushButton("Full FOV")
-        self.mask_chk  = QCheckBox("Mask")
+        ctrl.setSpacing(4)
+        self.mode_btn     = QPushButton("Zoom (Z)")
+        self.mean_max_btn = QPushButton("Max (A)")
+        self.mask_chk     = QCheckBox("Mask (M)")
         self.mask_chk.setChecked(True)
+        for btn in (self.mode_btn, self.mean_max_btn):
+            btn.setFixedHeight(20)
         ctrl.addWidget(self.mode_btn)
+        ctrl.addWidget(self.mean_max_btn)
         ctrl.addWidget(self.mask_chk)
         ctrl.addStretch()
         layout.addLayout(ctrl)
@@ -138,7 +230,6 @@ class ImagePanel(QWidget):
         cgrid = QGridLayout(cg)
         cgrid.setContentsMargins(4, 4, 4, 4)
         cgrid.setVerticalSpacing(2)
-
         self._lo_slider = QSlider(Qt.Horizontal)
         self._hi_slider = QSlider(Qt.Horizontal)
         for sl in (self._lo_slider, self._hi_slider):
@@ -148,7 +239,6 @@ class ImagePanel(QWidget):
         self._hi_slider.setValue(1000)
         self._reset_btn = QPushButton("Auto")
         self._reset_btn.setFixedWidth(44)
-
         cgrid.addWidget(QLabel("Lo"), 0, 0)
         cgrid.addWidget(self._lo_slider, 0, 1)
         cgrid.addWidget(QLabel("Hi"), 1, 0)
@@ -156,36 +246,52 @@ class ImagePanel(QWidget):
         cgrid.addWidget(self._reset_btn, 0, 2, 2, 1)
         layout.addWidget(cg)
 
-        # image view
-        self.view = pg.ImageView(view=pg.PlotItem())
-        self.view.ui.roiBtn.hide()
-        self.view.ui.menuBtn.hide()
-        self.view.ui.histogram.hide()
-        self.view.setFixedHeight(280)
-        self.view.view.setAspectLocked(True)
-        layout.addWidget(self.view)
+        # single RGBA ImageItem
+        self.img_plot = pg.PlotWidget()
+        self.img_plot.setFixedHeight(220)
+        self.img_plot.hideAxis("left")
+        self.img_plot.hideAxis("bottom")
+        self.img_plot.setAspectLocked(True)
+        self.img_plot.setMenuEnabled(False)
+        self.img_item = pg.ImageItem()
+        self.img_plot.addItem(self.img_item)
+        layout.addWidget(self.img_plot)
 
-        self._fov_norm: np.ndarray | None = None
+        self._max_img:  np.ndarray | None = None
+        self._mean_img: np.ndarray | None = None
         self._mask:     np.ndarray | None = None
-        self._zoom_mode = False   # False = zoom crop, True = full FOV
+        self._zoom_mode = False   # False = zoomed crop, True = full FOV
+        self._img_mode  = "max"   # "max" or "mean"
 
-        self.mode_btn.clicked.connect(self._toggle_mode)
-        self._lo_slider.valueChanged.connect(self._apply_contrast)
-        self._hi_slider.valueChanged.connect(self._apply_contrast)
+        self.mode_btn.clicked.connect(self.toggle_zoom)
+        self.mean_max_btn.clicked.connect(self.toggle_img_mode)
+        self._lo_slider.valueChanged.connect(self._redraw)
+        self._hi_slider.valueChanged.connect(self._redraw)
         self._reset_btn.clicked.connect(self.auto_contrast)
         self.mask_chk.stateChanged.connect(self._redraw)
 
     # ── public API ────────────────────────────────────────────────────────────
 
-    def set_roi(self, fov_norm: np.ndarray, mask: np.ndarray):
-        """fov_norm must already be normalized to [0,1]."""
-        self._fov_norm = fov_norm
-        self._mask = mask
+    def set_roi(self, max_img: np.ndarray, mean_img: np.ndarray, mask: np.ndarray):
+        """All images must already be normalized to [0, 1]."""
+        self._max_img  = max_img
+        self._mean_img = mean_img
+        self._mask     = mask
         self.auto_contrast()
-        self._redraw()
+
+    def toggle_zoom(self):
+        self._zoom_mode = not self._zoom_mode
+        self.mode_btn.setText("FOV (Z)" if self._zoom_mode else "Zoom (Z)")
+        self.auto_contrast()
+
+    def toggle_img_mode(self):
+        self._img_mode = "mean" if self._img_mode == "max" else "max"
+        self.mean_max_btn.setText(
+            "Mean (A)" if self._img_mode == "mean" else "Max (A)")
+        self.auto_contrast()
 
     def auto_contrast(self):
-        if self._fov_norm is None or self._mask is None:
+        if self._max_img is None:
             return
         fov, mask = self._current_fov_mask()
         px = fov[mask] if mask.any() else fov.ravel()
@@ -194,57 +300,43 @@ class ImagePanel(QWidget):
         span = max(hi - lo, 0.05)
         lo = max(lo - 0.05 * span, 0.0)
         hi = min(hi + 0.05 * span, 1.0)
-        # update sliders without firing redraws mid-update
         for sl in (self._lo_slider, self._hi_slider):
             sl.blockSignals(True)
         self._lo_slider.setValue(int(lo * 1000))
         self._hi_slider.setValue(int(hi * 1000))
         for sl in (self._lo_slider, self._hi_slider):
             sl.blockSignals(False)
-        self._apply_contrast()
+        self._redraw()
 
     # ── internal ─────────────────────────────────────────────────────────────
 
-    def _toggle_mode(self):
-        self._zoom_mode = not self._zoom_mode
-        self.mode_btn.setText("Zoomed" if self._zoom_mode else "Full FOV")
-        self.auto_contrast()
-        self._redraw()
+    def _current_img(self) -> np.ndarray:
+        return self._mean_img if self._img_mode == "mean" else self._max_img
 
     def _current_fov_mask(self):
+        fov = self._current_img()
         if self._zoom_mode:
-            return self._fov_norm, self._mask
-        fov_c, mask_c, _ = crop_around_mask(self._fov_norm, self._mask)
+            return fov, self._mask
+        fov_c, mask_c, _ = crop_around_mask(fov, self._mask)
         return fov_c, mask_c
 
-    def _apply_contrast(self):
-        lo = self._lo_slider.value() / 1000.0
-        hi = max(self._hi_slider.value() / 1000.0, lo + 1e-3)
-        self.view.setLevels(lo, hi)
-
     def _redraw(self):
-        if self._fov_norm is None:
+        if self._max_img is None:
             return
         fov, mask = self._current_fov_mask()
-        # build RGBA: gray FOV + optional red mask overlay
-        h, w = fov.shape
-        # pyqtgraph ImageView expects (x, y) or (row, col) with setImage transposing
-        # We pass (H, W, 4) uint8 and let pyqtgraph handle it.
-        rgba = np.stack([
-            (fov * 255).clip(0, 255).astype(np.uint8),
-            (fov * 255).clip(0, 255).astype(np.uint8),
-            (fov * 255).clip(0, 255).astype(np.uint8),
-            np.full((h, w), 255, dtype=np.uint8),
-        ], axis=-1)
+        lo = self._lo_slider.value() / 1000.0
+        hi = max(self._hi_slider.value() / 1000.0, lo + 1e-3)
+        gray8 = (np.clip((fov - lo) / (hi - lo), 0.0, 1.0) * 255).astype(np.uint8)
+        h, w = gray8.shape
+        rgba = np.stack([gray8, gray8, gray8,
+                         np.full((h, w), 255, dtype=np.uint8)], axis=-1)
         if self.mask_chk.isChecked() and mask.any():
             rgba[mask, 0] = MASK_COLOR[0]
             rgba[mask, 1] = MASK_COLOR[1]
             rgba[mask, 2] = MASK_COLOR[2]
             rgba[mask, 3] = 255
-        # pyqtgraph ImageView.setImage expects (width, height, channels) — transpose
-        self.view.setImage(rgba.transpose(1, 0, 2), autoLevels=False,
-                           autoHistogramRange=False)
-        self._apply_contrast()
+        self.img_item.setImage(rgba.transpose(1, 0, 2))
+        self.img_plot.autoRange()
 
 
 # ── metric histograms ─────────────────────────────────────────────────────────
@@ -263,13 +355,13 @@ class MetricHistograms(QWidget):
         self._all_metrics: dict[str, np.ndarray] = {}
 
         for name in METRIC_NAMES:
-            pw = pg.PlotWidget(title=name)
-            pw.setFixedHeight(90)
+            pw = pg.PlotWidget()
+            pw.setTitle(name, size="8pt")
+            pw.setFixedHeight(68)
             pw.hideAxis("left")
             pw.getAxis("bottom").setStyle(tickTextOffset=2)
             pw.setMouseEnabled(x=False, y=False)
             pw.setMenuEnabled(False)
-            pw.title.setFont(pg.QtGui.QFont("", 8))
             line = pg.InfiniteLine(angle=90, pen=pg.mkPen("r", width=2))
             pw.addItem(line)
             self._plots[name] = pw
@@ -367,7 +459,7 @@ class MainWindow(QMainWindow):
         self.output_path = Path(output_path)
 
         self.setWindowTitle("dFF Baseline QC")
-        self.resize(1400, 850)
+        self.resize(1200, 650)
 
         # state
         self._sessions: list[Path] = list_sessions(self.parent_dir)
@@ -379,8 +471,6 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._wire_signals()
-
-        pg.setConfigOptions(antialias=False, useOpenGL=True)
 
         if self._sessions:
             self._load_session(0)
@@ -394,7 +484,7 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(4, 4, 4, 4)
         root.setSpacing(4)
 
-        # ── top bar: session selector + ROI info ──
+        # ── top bar ──
         top = QHBoxLayout()
         top.addWidget(QLabel("Session:"))
         self.sess_combo = QComboBox()
@@ -402,12 +492,19 @@ class MainWindow(QMainWindow):
         for p in self._sessions:
             self.sess_combo.addItem(p.name)
         top.addWidget(self.sess_combo)
-        top.addSpacing(16)
-        self.roi_label = QLabel("ROI: — / —")
-        top.addWidget(self.roi_label)
+        top.addSpacing(12)
+        self.roi_label    = QLabel("ROI: — / —")
+        self.plane_label  = QLabel("")
+        self.roiid_label  = QLabel("")
         self.status_label = QLabel("")
-        top.addWidget(self.status_label)
+        for lbl in (self.roi_label, self.plane_label, self.roiid_label,
+                    self.status_label):
+            top.addWidget(lbl)
+            top.addSpacing(8)
         top.addStretch()
+        self.capture_btn = QPushButton("Capture (C)")
+        self.capture_btn.setFixedHeight(22)
+        top.addWidget(self.capture_btn)
         root.addLayout(top)
 
         # ── body: trace splitter | right column ──
@@ -446,6 +543,7 @@ class MainWindow(QMainWindow):
 
     def _wire_signals(self):
         self.sess_combo.currentIndexChanged.connect(self._on_session_changed)
+        self.capture_btn.clicked.connect(self._capture)
         self.curation.prev_btn.clicked.connect(self._prev_roi)
         self.curation.next_roi_btn.clicked.connect(self._next_roi)
         self.curation.save_btn.clicked.connect(self._save)
@@ -479,20 +577,20 @@ class MainWindow(QMainWindow):
         dffs      = {k: np.asarray(v[idx]) for k, v in sd.dffs.items()}
         self.trace_panel.update(ts, F, baselines, dffs)
 
-        # image
+        # image — load directly from session directory
         row = sd.rois.iloc[idx]
         plane_id    = str(row["plane_id"])
         cell_roi_id = int(row["cell_roi_id"])
-        proc_dir = find_processed_dir(sd.session_key, str(self.data_dir))
-        if proc_dir is not None:
-            plane_path = proc_dir / plane_id
-            try:
-                plane = load_plane_assets(str(plane_path))
-                mask  = get_roi_mask(plane, cell_roi_id)
-                fov_norm = normalize_for_display(plane.fov)
-                self.image_panel.set_roi(fov_norm, mask)
-            except Exception as e:
-                self.status_label.setText(f"[image error: {e}]")
+        self.plane_label.setText(f"plane: {plane_id}")
+        self.roiid_label.setText(f"cell_roi_id: {cell_roi_id}")
+        try:
+            plane    = load_plane_assets(str(sd.path), plane_id)
+            mask     = get_roi_mask(plane, cell_roi_id)
+            max_norm  = normalize_for_display(plane.max_img)
+            mean_norm = normalize_for_display(plane.mean_img)
+            self.image_panel.set_roi(max_norm, mean_norm, mask)
+        except Exception as e:
+            self.status_label.setText(f"[image error: {e}]")
 
         # metrics
         metric_row = sd.metrics.iloc[idx].to_dict()
@@ -546,6 +644,21 @@ class MainWindow(QMainWindow):
         self._save()
         self._next_roi()
 
+    def _capture(self):
+        import datetime
+        sd = self._session_data
+        tag = ""
+        if sd is not None:
+            row = sd.rois.iloc[self._roi_idx]
+            tag = (f"_{sd.session_key}_{row['plane_id']}"
+                   f"_cell{int(row['cell_roi_id'])}")
+        ts  = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = self.output_path.parent / "captures"
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / f"capture{tag}_{ts}.png"
+        self.grab().save(str(path))
+        self.status_label.setText(f"Saved: {path.name}")
+
     def _show_decision_status(self):
         sd = self._session_data
         if sd is None:
@@ -568,6 +681,22 @@ class MainWindow(QMainWindow):
             self._save()
         elif key == Qt.Key_Space:
             self._save_and_next()
+        elif key == Qt.Key_1:
+            self.trace_panel.toggle_trace("short")
+        elif key == Qt.Key_2:
+            self.trace_panel.toggle_trace("long")
+        elif key == Qt.Key_3:
+            self.trace_panel.toggle_trace("F0trend")
+        elif key == Qt.Key_4:
+            self.trace_panel.toggle_trace("F0")
+        elif key == Qt.Key_M:
+            self.image_panel.mask_chk.toggle()
+        elif key == Qt.Key_Z:
+            self.image_panel.toggle_zoom()
+        elif key == Qt.Key_A:
+            self.image_panel.toggle_img_mode()
+        elif key == Qt.Key_C:
+            self._capture()
         else:
             super().keyPressEvent(event)
 
@@ -577,6 +706,8 @@ class MainWindow(QMainWindow):
 def run(parent_dir: Path = DEFAULT_PARENT_DIR,
         data_dir:   Path = DEFAULT_DATA_DIR,
         output:     Path = DEFAULT_PATH):
+    pg.setConfigOptions(background="w", foreground="k",
+                        antialias=False, useOpenGL=False)
     app = QApplication.instance() or QApplication(sys.argv)
     win = MainWindow(parent_dir=parent_dir, data_dir=data_dir, output_path=output)
     win.show()
