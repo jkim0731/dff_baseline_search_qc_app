@@ -2,5 +2,3 @@ PyQt5>=5.15
 pyqtgraph>=0.13
 numpy>=1.25
 pandas>=1.5
-h5py>=3.0
-sparse>=0.14
