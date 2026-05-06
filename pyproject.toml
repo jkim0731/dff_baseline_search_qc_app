@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dff-baseline-qc"
+version = "0.1.0"
+description = "Interactive PyQt5/pyqtgraph app for curating dFF baseline fits"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt5>=5.15",
+    "pyqtgraph>=0.13",
+    "numpy>=1.25",
+    "pandas>=1.5",
+]
+
+[project.scripts]
+dff-qc = "qc_app.app:run"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["qc_app*"]
