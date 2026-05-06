@@ -756,7 +756,7 @@ class MainWindow(QMainWindow):
         ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         path = out / f"capture{tag}_{ts}.png"
         self.grab().save(str(path))
-        self.status_label.setText(f"Saved: {path.name}")
+        self.status_label.setText(f"Saved: {path}")
 
     def _show_decision_status(self):
         sd = self._session_data
