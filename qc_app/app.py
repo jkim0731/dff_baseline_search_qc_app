@@ -7,12 +7,12 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QKeyEvent
 from PyQt5.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
-    QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QMainWindow,
-    QPushButton, QSlider, QSplitter, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
+    QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog,
+    QLabel, QMainWindow, QPushButton, QSlider, QSplitter, QVBoxLayout, QWidget,
 )
 
 from .curation import DEFAULT_PATH, derive_category, load_curation, lookup_decision, save_decision
@@ -186,8 +186,8 @@ class TracePanel(QWidget):
             curve.setPen(_make_pen((r, g, b, self._dff_alpha), width=1))
 
     def _home(self):
-        self.f_plot.autoRange()
-        self.dff_plot.autoRange()
+        self.f_plot.enableAutoRange()
+        self.dff_plot.enableAutoRange()
 
     def update(self, timestamps, F, baselines, dffs):
         self._f_curves["F"].setData(timestamps, F)
@@ -197,6 +197,66 @@ class TracePanel(QWidget):
         for name, trace in dffs.items():
             if name in self._dff_curves:
                 self._dff_curves[name].setData(timestamps, trace)
+
+
+# ── bi-state text toggle ─────────────────────────────────────────────────────
+
+class _BiToggleLabel(QLabel):
+    """'Option A / Option B' clickable button-style label.
+
+    The active option label is bold black; the inactive one is light gray.
+    Parenthesised shortcut hints like '(Z)' are always rendered dark.
+    Emits ``toggled`` after each flip (by click or programmatic toggle()).
+    """
+    toggled = pyqtSignal()
+
+    _HINT_RE = __import__("re").compile(r"^(.*?)(\s*\([^)]+\))$")
+
+    def __init__(self, option_a: str, option_b: str,
+                 active: int = 0, parent=None):
+        super().__init__(parent)
+        self._options = (option_a, option_b)
+        self._active  = active % 2
+        self.setCursor(Qt.PointingHandCursor)
+        self.setStyleSheet(
+            "QLabel { border: 1px solid #aaa; border-radius: 3px;"
+            "         padding: 2px 7px; background: #ebebeb; }"
+            "QLabel:hover { background: #ddd; border-color: #888; }"
+        )
+        self._refresh()
+
+    def active(self) -> int:
+        return self._active
+
+    def setActive(self, idx: int, emit: bool = True):
+        idx = idx % 2
+        if self._active == idx:
+            return
+        self._active = idx
+        self._refresh()
+        if emit:
+            self.toggled.emit()
+
+    def toggle(self):
+        self.setActive(1 - self._active)
+
+    def mousePressEvent(self, ev):
+        self.toggle()
+        super().mousePressEvent(ev)
+
+    def _refresh(self):
+        parts = []
+        for i, opt in enumerate(self._options):
+            m = self._HINT_RE.match(opt)
+            label, hint = (m.group(1), m.group(2)) if m else (opt, "")
+            if i == self._active:
+                segment = f"<b style='color:#111'>{label}</b>"
+            else:
+                segment = f"<span style='color:#bbb'>{label}</span>"
+            if hint:
+                segment += f"<span style='color:#444'>{hint}</span>"
+            parts.append(segment)
+        self.setText(" / ".join(parts))
 
 
 # ── image panel ───────────────────────────────────────────────────────────────
@@ -210,17 +270,20 @@ class ImagePanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
-        # controls row
+        # controls row — text toggles + mask checkbox
         ctrl = QHBoxLayout()
-        ctrl.setSpacing(4)
-        self.mode_btn     = QPushButton("Zoom (Z)")
-        self.mean_max_btn = QPushButton("Max (A)")
-        self.mask_chk     = QCheckBox("Mask (M)")
+        ctrl.setSpacing(10)
+
+        # "Zoom / FOV (Z)": active = 0 → Zoom (cropped), 1 → FOV (full)
+        self.zoom_toggle = _BiToggleLabel("Zoom", "FOV (Z)", active=0)
+        ctrl.addWidget(self.zoom_toggle)
+
+        # "Mean / Max (A)": active = 0 → Mean, 1 → Max (default)
+        self.img_toggle = _BiToggleLabel("Mean", "Max (A)", active=1)
+        ctrl.addWidget(self.img_toggle)
+
+        self.mask_chk = QCheckBox("Mask (M)")
         self.mask_chk.setChecked(True)
-        for btn in (self.mode_btn, self.mean_max_btn):
-            btn.setFixedHeight(20)
-        ctrl.addWidget(self.mode_btn)
-        ctrl.addWidget(self.mean_max_btn)
         ctrl.addWidget(self.mask_chk)
         ctrl.addStretch()
         layout.addLayout(ctrl)
@@ -260,11 +323,9 @@ class ImagePanel(QWidget):
         self._max_img:  np.ndarray | None = None
         self._mean_img: np.ndarray | None = None
         self._mask:     np.ndarray | None = None
-        self._zoom_mode = False   # False = zoomed crop, True = full FOV
-        self._img_mode  = "max"   # "max" or "mean"
 
-        self.mode_btn.clicked.connect(self.toggle_zoom)
-        self.mean_max_btn.clicked.connect(self.toggle_img_mode)
+        self.zoom_toggle.toggled.connect(self.auto_contrast)
+        self.img_toggle.toggled.connect(self.auto_contrast)
         self._lo_slider.valueChanged.connect(self._redraw)
         self._hi_slider.valueChanged.connect(self._redraw)
         self._reset_btn.clicked.connect(self.auto_contrast)
@@ -280,15 +341,10 @@ class ImagePanel(QWidget):
         self.auto_contrast()
 
     def toggle_zoom(self):
-        self._zoom_mode = not self._zoom_mode
-        self.mode_btn.setText("FOV (Z)" if self._zoom_mode else "Zoom (Z)")
-        self.auto_contrast()
+        self.zoom_toggle.toggle()   # emits toggled → auto_contrast
 
     def toggle_img_mode(self):
-        self._img_mode = "mean" if self._img_mode == "max" else "max"
-        self.mean_max_btn.setText(
-            "Mean (A)" if self._img_mode == "mean" else "Max (A)")
-        self.auto_contrast()
+        self.img_toggle.toggle()    # emits toggled → auto_contrast
 
     def auto_contrast(self):
         if self._max_img is None:
@@ -311,11 +367,11 @@ class ImagePanel(QWidget):
     # ── internal ─────────────────────────────────────────────────────────────
 
     def _current_img(self) -> np.ndarray:
-        return self._mean_img if self._img_mode == "mean" else self._max_img
+        return self._mean_img if self.img_toggle.active() == 0 else self._max_img
 
     def _current_fov_mask(self):
         fov = self._current_img()
-        if self._zoom_mode:
+        if self.zoom_toggle.active() == 1:   # FOV mode
             return fov, self._mask
         fov_c, mask_c, _ = crop_around_mask(fov, self._mask)
         return fov_c, mask_c
