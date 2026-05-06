@@ -11,7 +11,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QKeyEvent
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
-    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow,
+    QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QMainWindow,
     QPushButton, QSlider, QSplitter, QVBoxLayout, QWidget,
 )
 
@@ -452,13 +452,15 @@ class CurationPanel(QWidget):
 # ── main window ───────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
-    def __init__(self, parent_dir: Path, data_dir: Path, output_path: Path):
+    def __init__(self, parent_dir: Path, data_dir: Path, output_path: Path,
+                 user: str = ""):
         super().__init__()
         self.parent_dir  = Path(parent_dir)
         self.data_dir    = Path(data_dir)
         self.output_path = Path(output_path)
+        self._user       = user
 
-        self.setWindowTitle("dFF Baseline QC")
+        self.setWindowTitle(f"dFF Baseline QC — {user}" if user else "dFF Baseline QC")
         self.resize(1200, 650)
 
         # state
@@ -635,6 +637,7 @@ class MainWindow(QMainWindow):
             cell_roi_id=int(row["cell_roi_id"]),
             selected=selected,
             undecided=undecided,
+            user=self._user,
             path=self.output_path,
         )
         cat = derive_category(selected, undecided)
@@ -715,12 +718,20 @@ def run(parent_dir: Path | None = None,
         chosen = QFileDialog.getExistingDirectory(
             None, "Select session data folder", start)
         if not chosen:
-            sys.exit(0)   # user cancelled
+            sys.exit(0)
         parent_dir = Path(chosen)
+
+    user = ""
+    while not user.strip():
+        name, ok = QInputDialog.getText(None, "Login", "Enter your name:")
+        if not ok:
+            sys.exit(0)
+        user = name.strip()
 
     if output is None:
         output = parent_dir / "curation.csv"
 
-    win = MainWindow(parent_dir=parent_dir, data_dir=data_dir, output_path=output)
+    win = MainWindow(parent_dir=parent_dir, data_dir=data_dir,
+                     output_path=output, user=user)
     win.show()
     sys.exit(app.exec_())

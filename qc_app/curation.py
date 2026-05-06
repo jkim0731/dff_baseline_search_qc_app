@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 CURATION_COLUMNS = [
-    "session_key", "roi_index", "plane_id", "cell_roi_id",
+    "user", "session_key", "roi_index", "plane_id", "cell_roi_id",
     "selected", "category", "undecided", "timestamp",
 ]
 DEFAULT_PATH = Path("/root/capsule/scratch/first_try/curation.csv")
@@ -37,13 +37,14 @@ def load_curation(path: Path = DEFAULT_PATH) -> pd.DataFrame:
 
 
 def save_decision(session_key: str, roi_index: int, plane_id: str, cell_roi_id: int,
-                  selected: list[str], undecided: bool,
+                  selected: list[str], undecided: bool, user: str = "",
                   path: Path = DEFAULT_PATH) -> pd.DataFrame:
     path = Path(path)
     df = load_curation(path)
     mask = (df["session_key"] == session_key) & (df["roi_index"] == roi_index)
     df = df.loc[~mask].copy()
     row = {
+        "user":        user,
         "session_key": session_key,
         "roi_index":   int(roi_index),
         "plane_id":    plane_id,
