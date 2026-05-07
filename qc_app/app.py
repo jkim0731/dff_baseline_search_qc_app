@@ -10,17 +10,19 @@ import pyqtgraph as pg
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QKeyEvent
 from PyQt5.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
+    QApplication, QCheckBox, QComboBox, QDockWidget, QDoubleSpinBox,
     QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog,
     QLabel, QMainWindow, QPushButton, QSlider, QSplitter, QVBoxLayout, QWidget,
 )
 
 from .curation import DEFAULT_PATH, derive_category, load_curation, lookup_decision, save_decision
 from .data import (
-    DEFAULT_DATA_DIR, DEFAULT_PARENT_DIR, aggregate_metrics,
+    DEFAULT_DATA_DIR, DEFAULT_PARENT_DIR, _safe_dff, aggregate_metrics,
     list_sessions, load_session,
 )
 from .rois import crop_around_mask, get_roi_mask, load_plane_assets, normalize_for_display
+from .runs import DEFAULT_RUNS_DIR, list_run_sessions, load_run_baseline
+from .runs_panel import CompareRunsPanel
 
 # ── visual constants ──────────────────────────────────────────────────────────
 BASELINE_COLORS = {
@@ -188,6 +190,26 @@ class TracePanel(QWidget):
     def _home(self):
         self.f_plot.enableAutoRange()
         self.dff_plot.enableAutoRange()
+
+    def set_available_keys(self, keys: list[str]):
+        """Show/hide legend buttons and clear curves for keys not in this session."""
+        empty = np.array([])
+        for name, btn in self._legend_btns.items():
+            available = name in keys
+            btn.setVisible(available)
+            if not available:
+                if name in self._f_curves:
+                    self._f_curves[name].setData(empty, empty)
+                if name in self._dff_curves:
+                    self._dff_curves[name].setData(empty, empty)
+
+    def set_slot_label(self, slot_key: str, label: str | None):
+        """Override the legend button text for one slot (None → restore default)."""
+        btn = self._legend_btns.get(slot_key)
+        if btn is None:
+            return
+        i = list(self._legend_btns).index(slot_key) + 1   # match 1-based hotkeys
+        btn.setText(f"{i}:{slot_key}" if label is None else f"{i}:{label}")
 
     def update(self, timestamps, F, baselines, dffs):
         self._f_curves["F"].setData(timestamps, F)
@@ -499,6 +521,15 @@ class CurationPanel(QWidget):
         self.chk_f0.setChecked("F0" in selected)
         self.chk_undecided.setChecked(undecided)
 
+    def set_available_keys(self, keys: list[str]):
+        """Show only checkboxes for baseline keys present in this session."""
+        for key, chk in [("short", self.chk_short), ("long", self.chk_long),
+                          ("F0trend", self.chk_f0trend), ("F0", self.chk_f0)]:
+            available = key in keys
+            chk.setVisible(available)
+            if not available:
+                chk.setChecked(False)
+
     def clear(self):
         for chk in (self.chk_short, self.chk_long, self.chk_f0trend,
                     self.chk_f0, self.chk_undecided):
@@ -509,24 +540,40 @@ class CurationPanel(QWidget):
 
 class MainWindow(QMainWindow):
     def __init__(self, parent_dir: Path, data_dir: Path, output_path: Path,
-                 user: str = ""):
+                 user: str = "",
+                 runs_dirs: list[Path] | Path | None = None):
         super().__init__()
         self.parent_dir  = Path(parent_dir)
         self.data_dir    = Path(data_dir)
         self.output_path = Path(output_path)
         self._user       = user
+        # Normalize to list[Path]; accept None / single Path / list for flexibility.
+        if runs_dirs is None:
+            self._runs_dirs: list[Path] = []
+        elif isinstance(runs_dirs, (str, Path)):
+            self._runs_dirs = [Path(runs_dirs)]
+        else:
+            self._runs_dirs = [Path(d) for d in runs_dirs]
 
         self.setWindowTitle(f"dFF Baseline QC — {user}" if user else "dFF Baseline QC")
-        self.resize(1200, 650)
+        # Width is resizable, height is fixed so the curation row at the bottom
+        # is always visible (compare dock pops out as its own floating window).
+        self.resize(1200, 680)
+        self.setFixedHeight(680)
 
         # state
-        self._sessions: list[Path] = list_sessions(self.parent_dir)
+        self._all_sessions: list[Path] = list_sessions(self.parent_dir)
+        # When compare-mode slot overrides are active, _sessions is restricted
+        # to the intersection of session keys present across the selected runs.
+        self._sessions: list[Path] = list(self._all_sessions)
         self._sess_idx  = 0
         self._roi_idx   = 0
         self._session_data = None
         self._curation_df  = load_curation(self.output_path)
         self._agg_metrics  = aggregate_metrics(str(self.parent_dir))
         self._capture_dir: Path | None = None   # resolved lazily; None = use default
+        # slot_key -> (run_dir: Path, kind: str, label: str). Empty ⇒ legacy.
+        self._slot_overrides: dict[str, tuple[Path, str, str]] = {}
 
         self._build_ui()
         self._wire_signals()
@@ -561,6 +608,17 @@ class MainWindow(QMainWindow):
             top.addWidget(lbl)
             top.addSpacing(8)
         top.addStretch()
+        if self._runs_dirs:
+            self.compare_runs_btn = QPushButton("Compare mode (R)")
+            self.compare_runs_btn.setCheckable(True)
+            self.compare_runs_btn.setFixedHeight(22)
+            self.compare_runs_btn.setToolTip(
+                "Toggle the persistent compare panel "
+                f"(reads runs from {len(self._runs_dirs)} source(s); add more from inside the panel)"
+            )
+            top.addWidget(self.compare_runs_btn)
+        else:
+            self.compare_runs_btn = None
         self.capture_btn = QPushButton("Capture (C)")
         self.capture_btn.setFixedHeight(22)
         top.addWidget(self.capture_btn)
@@ -600,6 +658,27 @@ class MainWindow(QMainWindow):
         self.curation = CurationPanel()
         root.addWidget(self.curation)
 
+        # ── compare-mode dock (only when runs_dir is set) ──
+        # Floats by default so toggling it on/off never reflows or hides any
+        # part of the main window. The user can still drag-dock it on demand.
+        self.compare_panel = None
+        self.compare_dock = None
+        if self._runs_dirs:
+            self.compare_panel = CompareRunsPanel(
+                self._runs_dirs, current=self._slot_overrides
+            )
+            self.compare_dock = QDockWidget("Compare mode", self)
+            self.compare_dock.setObjectName("compare_dock")
+            self.compare_dock.setWidget(self.compare_panel)
+            self.compare_dock.setAllowedAreas(
+                Qt.BottomDockWidgetArea | Qt.RightDockWidgetArea
+            )
+            self.addDockWidget(Qt.BottomDockWidgetArea, self.compare_dock)
+            self.compare_dock.setFloating(True)
+            # Place beside the main window with a sensible default size
+            self.compare_dock.resize(1100, 460)
+            self.compare_dock.hide()   # hidden by default — toggle via "Compare mode (R)"
+
     def _wire_signals(self):
         self.sess_combo.currentIndexChanged.connect(self._on_session_changed)
         self.capture_btn.clicked.connect(self._capture)
@@ -607,6 +686,78 @@ class MainWindow(QMainWindow):
         self.curation.next_roi_btn.clicked.connect(self._next_roi)
         self.curation.save_btn.clicked.connect(self._save)
         self.curation.next_btn.clicked.connect(self._save_and_next)
+        if self.compare_runs_btn is not None and self.compare_dock is not None:
+            self.compare_runs_btn.toggled.connect(self._set_compare_mode)
+            self.compare_dock.visibilityChanged.connect(
+                lambda v: self.compare_runs_btn.setChecked(v)
+            )
+            self.compare_panel.selectionsChanged.connect(self._on_compare_selections)
+
+    def _set_compare_mode(self, on: bool):
+        if self.compare_dock is None:
+            return
+        self.compare_dock.setVisible(on)
+        if on and self.compare_dock.isFloating():
+            self.compare_dock.raise_()
+
+    def _on_compare_selections(self, selections: dict):
+        self._slot_overrides = selections
+        for slot_key in ("short", "long", "F0trend", "F0"):
+            sel = self._slot_overrides.get(slot_key)
+            self.trace_panel.set_slot_label(
+                slot_key, None if sel is None else sel[2]
+            )
+        self._apply_session_intersection_filter()
+        self._refresh_roi()
+
+    def _apply_session_intersection_filter(self) -> None:
+        """Restrict sess_combo to sessions present in every assigned run.
+
+        With no overrides, restores the full session list from parent_dir.
+        If the current session is no longer compatible, jumps to the first
+        compatible one (or shows an empty state if none exist).
+        """
+        if not self._slot_overrides:
+            new_sessions = list(self._all_sessions)
+            note = ""
+        else:
+            run_dirs = {ovr[0] for ovr in self._slot_overrides.values()}
+            per_run = [set(list_run_sessions(rd)) for rd in run_dirs]
+            shared = set.intersection(*per_run) if per_run else set()
+            new_sessions = [p for p in self._all_sessions if p.name in shared]
+            note = (f"  ·  compare-mode session filter: "
+                    f"{len(new_sessions)}/{len(self._all_sessions)} sessions "
+                    f"shared across {len(run_dirs)} run(s)")
+
+        # No-op fast path
+        if [p.name for p in new_sessions] == [p.name for p in self._sessions]:
+            if note:
+                self.status_label.setText(note.lstrip("  ·  "))
+            return
+
+        cur_name = self._sessions[self._sess_idx].name if self._sessions else None
+        self._sessions = new_sessions
+
+        self.sess_combo.blockSignals(True)
+        self.sess_combo.clear()
+        for p in self._sessions:
+            self.sess_combo.addItem(p.name)
+        self.sess_combo.blockSignals(False)
+
+        if not self._sessions:
+            self.status_label.setText(
+                "No sessions are shared across the selected runs — "
+                "uncheck or reassign slots."
+            )
+            return
+        # Try to keep the user on the same session; otherwise jump to first
+        names = [p.name for p in self._sessions]
+        if cur_name in names:
+            self._load_session(names.index(cur_name))
+        else:
+            self._load_session(0)
+        if note:
+            self.status_label.setText(note.lstrip("  ·  "))
 
     # ── data loading ──────────────────────────────────────────────────────────
 
@@ -618,6 +769,12 @@ class MainWindow(QMainWindow):
         self.sess_combo.blockSignals(True)
         self.sess_combo.setCurrentIndex(idx)
         self.sess_combo.blockSignals(False)
+        # In runs-comparison mode, all 4 slots are always available (legacy or overridden).
+        keys = (["short", "long", "F0trend", "F0"]
+                if self._runs_dirs
+                else list(self._session_data.baselines.keys()))
+        self.trace_panel.set_available_keys(keys)
+        self.curation.set_available_keys(keys)
         self._refresh_roi()
 
     def _refresh_roi(self):
@@ -632,8 +789,7 @@ class MainWindow(QMainWindow):
 
         ts = sd.timestamps
         F  = np.asarray(sd.F[idx])
-        baselines = {k: np.asarray(v[idx]) for k, v in sd.baselines.items()}
-        dffs      = {k: np.asarray(v[idx]) for k, v in sd.dffs.items()}
+        baselines, dffs = self._build_slot_traces(sd, idx, F)
         self.trace_panel.update(ts, F, baselines, dffs)
 
         # image — load directly from session directory
@@ -676,6 +832,35 @@ class MainWindow(QMainWindow):
 
     def _on_session_changed(self, idx: int):
         self._load_session(idx)
+
+    def _build_slot_traces(self, sd, idx: int, F: np.ndarray):
+        """Per-slot (baseline, dff) for the current ROI.
+
+        For each of the 4 slot keys, prefer an override mapped to a run folder;
+        otherwise fall back to ``sd.baselines[slot_key]`` (legacy, may be absent).
+        """
+        baselines: dict = {}
+        dffs: dict = {}
+        for slot_key in ("short", "long", "F0trend", "F0"):
+            override = self._slot_overrides.get(slot_key)
+            if override is not None:
+                run_dir, kind, _label = override
+                try:
+                    arr = load_run_baseline(str(run_dir), sd.session_key, kind)
+                except FileNotFoundError:
+                    self.status_label.setText(
+                        f"[{slot_key}] missing in {Path(run_dir).name} for {sd.session_key}"
+                    )
+                    continue
+                b = np.asarray(arr[idx])
+                baselines[slot_key] = b
+                dffs[slot_key]      = _safe_dff(F, b)
+                continue
+            # legacy fallback
+            if slot_key in sd.baselines:
+                baselines[slot_key] = np.asarray(sd.baselines[slot_key][idx])
+                dffs[slot_key]      = np.asarray(sd.dffs[slot_key][idx])
+        return baselines, dffs
 
     # ── curation ─────────────────────────────────────────────────────────────
 
@@ -796,26 +981,67 @@ class MainWindow(QMainWindow):
             self.image_panel.toggle_img_mode()
         elif key == Qt.Key_C:
             self._capture()
+        elif key == Qt.Key_R and self.compare_runs_btn is not None:
+            self.compare_runs_btn.toggle()
         else:
             super().keyPressEvent(event)
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
 
+DEFAULT_RUNS_PARENT_DIR = Path("/results/runs/first_try")
+
+
+def _pick_dir(title: str, start: Path) -> Path | None:
+    start_str = str(start) if start.exists() else str(Path.home())
+    chosen = QFileDialog.getExistingDirectory(None, title, start_str)
+    return Path(chosen) if chosen else None
+
+
+def _pick_dirs_loop(start: Path) -> list[Path]:
+    """Pick one or more runs folders.
+
+    The first picker is required-cancellable: cancel the first dialog and the
+    user has skipped compare mode (returns []). After a folder is picked, we
+    repeatedly ask "Add another?" until the user clicks Cancel.
+    """
+    out: list[Path] = []
+    title = "Select runs folder #1 (Cancel to skip compare mode)"
+    while True:
+        chosen = _pick_dir(title, start)
+        if chosen is None:
+            return out
+        if chosen not in out:
+            out.append(chosen)
+        title = (
+            f"Pick another runs folder (currently: {len(out)} selected) "
+            "— Cancel when done"
+        )
+
+
 def run(parent_dir: Path | None = None,
         data_dir:   Path = DEFAULT_DATA_DIR,
-        output:     Path | None = None):
+        output:     Path | None = None,
+        runs_dir:   Path | None = None,
+        runs_dirs:  list[Path] | None = None):
     pg.setConfigOptions(background="w", foreground="k",
                         antialias=False, useOpenGL=False)
     app = QApplication.instance() or QApplication(sys.argv)
 
     if parent_dir is None:
-        start = str(DEFAULT_PARENT_DIR) if DEFAULT_PARENT_DIR.exists() else str(Path.home())
-        chosen = QFileDialog.getExistingDirectory(
-            None, "Select session data folder", start)
-        if not chosen:
+        parent_dir = _pick_dir(
+            "Select session data folder (parent of <session>/F_all_array.npy …)",
+            DEFAULT_RUNS_PARENT_DIR if DEFAULT_RUNS_PARENT_DIR.exists() else DEFAULT_PARENT_DIR,
+        )
+        if parent_dir is None:
             sys.exit(0)
-        parent_dir = Path(chosen)
+
+    # CLI overrides win; otherwise ask once, looping for "add another?".
+    if runs_dirs is None:
+        if runs_dir is not None:
+            runs_dirs = [runs_dir]
+        else:
+            runs_dirs = _pick_dirs_loop(DEFAULT_RUNS_DIR)
 
     user = ""
     while not user.strip():
@@ -825,9 +1051,18 @@ def run(parent_dir: Path | None = None,
         user = name.strip()
 
     if output is None:
-        output = parent_dir / "curation.csv"
+        # parent_dir may be read-only on CodeOcean — fall back to $HOME if so.
+        try:
+            (parent_dir / ".write_probe").touch()
+            (parent_dir / ".write_probe").unlink()
+            output = parent_dir / "curation.csv"
+        except (PermissionError, OSError):
+            output = Path.home() / "dff_baseline_qc_curation.csv"
 
     win = MainWindow(parent_dir=parent_dir, data_dir=data_dir,
-                     output_path=output, user=user)
+                     output_path=output, user=user, runs_dirs=runs_dirs)
+    if runs_dirs and getattr(win, "compare_runs_btn", None) is not None:
+        # Open the compare dock by default so the picker is immediately visible.
+        win.compare_runs_btn.setChecked(True)
     win.show()
     sys.exit(app.exec_())

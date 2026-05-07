@@ -49,27 +49,45 @@ def list_sessions(parent_dir: Path = DEFAULT_PARENT_DIR) -> list[Path]:
     return sorted(p for p in Path(parent_dir).iterdir() if p.is_dir())
 
 
+_BASELINE_FILES = {
+    "short":   "baseline_short_window_all_array.npy",
+    "long":    "baseline_long_window_all_array.npy",
+    "F0trend": "F0trend_all.npy",
+    "F0":      "F0_all.npy",
+}
+_PRECOMP_DFF_FILES = {
+    "short": "dff_short_window_all_array.npy",
+    "long":  "dff_long_window_all_array.npy",
+}
+
+
 @lru_cache(maxsize=8)
 def load_session(session_path_str: str) -> SessionData:
     p = Path(session_path_str)
     rois = pd.read_csv(p / "sczdrift_df_all.csv")
     F = np.load(p / "F_all_array.npy", mmap_mode="r")
-    timestamps = np.load(p / "timestamps.npy")
-    baselines = {
-        "short":   np.load(p / "baseline_short_window_all_array.npy", mmap_mode="r"),
-        "long":    np.load(p / "baseline_long_window_all_array.npy",  mmap_mode="r"),
-        "F0trend": np.load(p / "F0trend_all.npy", mmap_mode="r"),
-        "F0":      np.load(p / "F0_all.npy",      mmap_mode="r"),
-    }
-    dffs = {
-        "short":   np.load(p / "dff_short_window_all_array.npy", mmap_mode="r"),
-        "long":    np.load(p / "dff_long_window_all_array.npy",  mmap_mode="r"),
-        "F0trend": _safe_dff(np.asarray(F), np.asarray(baselines["F0trend"])),
-        "F0":      _safe_dff(np.asarray(F), np.asarray(baselines["F0"])),
-    }
+    ts_path = p / "timestamps.npy"
+    timestamps = np.load(ts_path) if ts_path.exists() else np.arange(F.shape[1], dtype=np.float32)
+
+    baselines: dict = {}
+    dffs: dict = {}
+    for key, bfile in _BASELINE_FILES.items():
+        bpath = p / bfile
+        if not bpath.exists():
+            continue
+        b = np.load(bpath, mmap_mode="r")
+        baselines[key] = b
+        dfile = _PRECOMP_DFF_FILES.get(key)
+        dpath = p / dfile if dfile else None
+        if dpath and dpath.exists():
+            dffs[key] = np.load(dpath, mmap_mode="r")
+        else:
+            dffs[key] = _safe_dff(np.asarray(F), np.asarray(b))
+
     metrics = pd.DataFrame({
         display: np.load(p / f"{key}.npy")
         for key, display in METRIC_DISPLAY.items()
+        if (p / f"{key}.npy").exists()
     })
     return SessionData(session_key=p.name, path=p, timestamps=timestamps,
                        F=F, baselines=baselines, dffs=dffs, metrics=metrics, rois=rois)

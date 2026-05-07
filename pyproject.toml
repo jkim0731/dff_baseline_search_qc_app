@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dff-baseline-qc"
-version = "0.1.0"
-description = "Interactive PyQt5/pyqtgraph app for curating dFF baseline fits"
+name = "dff-baseline-search-app"
+version = "0.2.0"
+description = "Recipe-driven baseline fitting + PyQt5/pyqtgraph QC app for dFF curation"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -13,11 +13,15 @@ dependencies = [
     "pyqtgraph>=0.13",
     "numpy>=1.25",
     "pandas>=1.5",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "joblib>=1.3",
 ]
 
 [project.scripts]
-dff-qc = "qc_app.app:run"
+dff-qc  = "qc_app.app:run"
+dff-fit = "baseline_search.run:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["qc_app*"]
+include = ["qc_app*", "baseline_search*"]
