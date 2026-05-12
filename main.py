@@ -1,11 +1,29 @@
 """Entry point: ``python main.py`` — no flags needed.
 
-On startup the app asks you (via folder pickers) for:
-  parent_dir   (per-session inputs: F, baselines, metrics)
-  runs_dir     (parent of NNNN_<slug>/ + index.csv; Cancel to skip compare mode)
+On startup the app shows a single folder picker:
 
-CLI flags (--parent-dir, --runs-dir, --output) are escape hatches — they
-suppress the corresponding prompt.
+  inputs_dir   the folder that contains per-session subfolders
+               (each subfolder has F_all_array.npy, timestamps.npy, etc.)
+
+The **parent** of the chosen inputs folder is automatically treated as the
+runs root (it must contain index.csv and NNNN_<slug>/ run folders).
+
+Example layout::
+
+    /results/runs/               ← runs root (auto-detected as parent)
+        index.csv
+        0001_first_try/
+        0002_cpos3_cneg3_lowess/
+        ...
+        first_try/               ← pick THIS as the inputs folder
+            755252_2024-11-12/
+                F_all_array.npy
+                ...
+            755252_2024-11-19/
+                ...
+
+CLI flags (--parent-dir, --output) are escape hatches that suppress the
+corresponding prompt.
 """
 
 import argparse
@@ -18,20 +36,17 @@ from qc_app.data import DEFAULT_DATA_DIR
 def _parse():
     p = argparse.ArgumentParser(description="dFF Baseline QC App")
     p.add_argument("--parent-dir", type=Path, default=None,
-                   help="Override the auto-detected per-session input directory.")
+                   help="Inputs folder (parent of session subfolders). "
+                        "Suppresses the folder picker.")
     p.add_argument("--data-dir",   type=Path, default=DEFAULT_DATA_DIR,
                    help="Root of processed ophys data (unused if assets are "
-                        "in the session folder)")
+                        "in the session folder).")
     p.add_argument("--output",     type=Path, default=None,
                    help="Path for curation CSV "
-                        "(defaults to <parent-dir>/curation.csv)")
-    p.add_argument("--runs-dir",   type=Path, default=None, action="append",
-                   help="Pass once or multiple times to seed the compare panel "
-                        "with that many runs folders. Suppresses the runs picker.")
+                        "(defaults to <parent-dir>/curation.csv).")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse()
-    run(parent_dir=args.parent_dir, data_dir=args.data_dir, output=args.output,
-        runs_dirs=args.runs_dir)
+    run(parent_dir=args.parent_dir, data_dir=args.data_dir, output=args.output)

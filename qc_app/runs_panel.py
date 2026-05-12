@@ -25,14 +25,14 @@ import pandas as pd
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QStandardItem, QStandardItemModel
 from PyQt5.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QGridLayout,
-    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QListWidget, QMessageBox,
-    QPushButton, QSplitter, QTableView, QVBoxLayout, QWidget,
+    QAbstractItemView, QAction, QCheckBox, QComboBox, QFileDialog, QGridLayout,
+    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QListWidget, QMenu,
+    QMessageBox, QPushButton, QSplitter, QTableView, QVBoxLayout, QWidget,
 )
 
 from .runs import DEFAULT_RUNS_DIR, discover_runs_multi_with_status
 
-SLOT_KEYS    = ("short", "long", "F0trend", "F0")
+SLOT_KEYS    = ("short", "long", "F0trend", "F0", "run5", "run6", "run7", "run8")
 KIND_OPTIONS = ("F0trend", "F0")
 
 # These are the "signal" columns we always show in the runs list. Anything
@@ -68,6 +68,7 @@ class CompareRunsPanel(QWidget):
         self._df: pd.DataFrame = pd.DataFrame()
         self._checked_run_dirs: set[str] = set()
         self._selections: dict[str, tuple[Path, str, str]] = dict(current or {})
+        self._diff_run_rows: list[pd.Series] = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
@@ -166,6 +167,8 @@ class CompareRunsPanel(QWidget):
         self.runs_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.runs_table.horizontalHeader().setStretchLastSection(True)
         self.runs_table.setMinimumHeight(120)
+        self.runs_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.runs_table.customContextMenuRequested.connect(self._on_runs_context_menu)
         layout.addWidget(self.runs_table, stretch=1)
 
         all_btn.clicked.connect(lambda: self._set_all_checked(True))
@@ -224,6 +227,70 @@ class CompareRunsPanel(QWidget):
                 continue
             item.setCheckState(Qt.Checked if on else Qt.Unchecked)
 
+    def _on_runs_context_menu(self, pos) -> None:
+        idx = self.runs_table.indexAt(pos)
+        if not idx.isValid():
+            return
+        model = self.runs_table.model()
+        check_item = model.item(idx.row(), 0)
+        if check_item is None:
+            return
+        run_dir_str = check_item.data(Qt.UserRole)
+        if not run_dir_str or self._df.empty:
+            return
+        match = self._df[self._df["run_dir"] == run_dir_str]
+        if match.empty:
+            return
+        run_row = match.iloc[0]
+        self._slot_menu_for_run(run_row, self.runs_table.viewport().mapToGlobal(pos))
+
+    def _assign_from_context(self, slot_key: str, kind: str, row: pd.Series) -> None:
+        self._assign(slot_key, row, kind)
+        self._refresh_slot_labels()
+        self.selectionsChanged.emit(dict(self._selections))
+
+    def _slot_menu_for_run(self, run_row: pd.Series, global_pos) -> None:
+        """Show the slot-assignment menu for a run row at a global screen position."""
+        menu = QMenu(self)
+        for i, slot_key in enumerate(SLOT_KEYS, start=1):
+            sel = self._selections.get(slot_key)
+            status = slot_key if sel is None else sel[2]
+            sub = menu.addMenu(f"Slot {i}:  {status}")
+            for kind in KIND_OPTIONS:
+                act = QAction(kind, self)
+                act.triggered.connect(
+                    lambda _, sk=slot_key, k=kind, r=run_row:
+                        self._assign_from_context(sk, k, r)
+                )
+                sub.addAction(act)
+        menu.exec_(global_pos)
+
+    def _on_diff_context_menu(self, pos) -> None:
+        """Right-click on a diff table cell — use the column to identify the run."""
+        idx = self.diff_table.indexAt(pos)
+        if not idx.isValid():
+            return
+        col = idx.column()
+        # Column 0 is the parameter name; run columns start at 1.
+        run_idx = col - 1
+        if run_idx < 0 or run_idx >= len(getattr(self, '_diff_run_rows', [])):
+            return
+        self._slot_menu_for_run(
+            self._diff_run_rows[run_idx],
+            self.diff_table.viewport().mapToGlobal(pos),
+        )
+
+    def _on_diff_header_context_menu(self, pos) -> None:
+        """Right-click on a diff table column header."""
+        col = self.diff_table.horizontalHeader().logicalIndexAt(pos)
+        run_idx = col - 1
+        if run_idx < 0 or run_idx >= len(getattr(self, '_diff_run_rows', [])):
+            return
+        self._slot_menu_for_run(
+            self._diff_run_rows[run_idx],
+            self.diff_table.horizontalHeader().mapToGlobal(pos),
+        )
+
     # ── Diff section ─────────────────────────────────────────────────────────
 
     def _build_diff_section(self, parent: QWidget) -> None:
@@ -243,10 +310,16 @@ class CompareRunsPanel(QWidget):
 
         self.diff_table = QTableView()
         self.diff_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.diff_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.diff_table.setSelectionBehavior(QAbstractItemView.SelectColumns)
+        self.diff_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.diff_table.horizontalHeader().setStretchLastSection(False)
         self.diff_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.diff_table.setMinimumHeight(80)
+        self.diff_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.diff_table.customContextMenuRequested.connect(self._on_diff_context_menu)
+        self.diff_table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.diff_table.horizontalHeader().customContextMenuRequested.connect(
+            self._on_diff_header_context_menu)
         layout.addWidget(self.diff_table, stretch=1)
 
         self.diff_summary = QLabel("")
@@ -265,6 +338,8 @@ class CompareRunsPanel(QWidget):
         checked_idx = [i for i, rd in enumerate(df["run_dir"])
                        if rd in self._checked_run_dirs]
         sub = df.iloc[checked_idx]
+        # Store run rows so the context menu can look them up by column index.
+        self._diff_run_rows: list[pd.Series] = [row for _, row in sub.iterrows()]
         # Parameter rows = recipe_* columns we don't actively exclude
         param_cols = [c for c in df.columns
                       if c.startswith("recipe_") and c not in _DIFF_EXCLUDE_COLS]
@@ -312,7 +387,7 @@ class CompareRunsPanel(QWidget):
     # ── Slot section ─────────────────────────────────────────────────────────
 
     def _build_slot_section(self, root: QVBoxLayout) -> None:
-        gb = QGroupBox("Slot assignments — match keys 1–4 in the main window")
+        gb = QGroupBox("Slot assignments — match keys 1–8 in the main window")
         gl = QVBoxLayout(gb)
 
         # Quick-assign row
@@ -322,12 +397,11 @@ class CompareRunsPanel(QWidget):
         self.quick_kind.addItems(KIND_OPTIONS)
         quick.addWidget(self.quick_kind)
         qa_btn = QPushButton("→ Slots 1..N (same kind)")
-        qa_btn.setToolTip(
-            "Map the first 4 checked runs to slots 1–4 with the chosen kind."
-        )
-        qa_pair_btn = QPushButton("→ Slots 1–2 = run·F0trend, 3–4 = run·F0")
+        qa_btn.setToolTip("Map the first 8 checked runs to slots 1–8 with the chosen kind.")
+        qa_pair_btn = QPushButton("→ F0trend then F0 (pairs)")
         qa_pair_btn.setToolTip(
-            "Map checked runs into 4 slots showing F0trend AND F0 of each run."
+            "Map first 4 checked runs to slots 1–4 as F0trend, "
+            "then same runs to slots 5–8 as F0."
         )
         reset_btn = QPushButton("Reset all → legacy")
         for b in (qa_btn, qa_pair_btn, reset_btn):
@@ -335,28 +409,30 @@ class CompareRunsPanel(QWidget):
         quick.addStretch()
         gl.addLayout(quick)
 
-        # Per-slot grid (kind picker + label) — same as before, more compact.
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(6)
-        grid.setVerticalSpacing(2)
+        # Two rows of 4 slots each (slots 1-4, then 5-8).
         self._slot_widgets: dict[str, dict] = {}
-        for col, key in enumerate(SLOT_KEYS):
-            grid.addWidget(QLabel(f"<b>{col + 1}: {key}</b>"), 0, col, Qt.AlignCenter)
-            kind_combo = QComboBox()
-            kind_combo.addItems(KIND_OPTIONS)
-            grid.addWidget(kind_combo, 1, col)
-            assign_btn = QPushButton("← Assign first checked")
-            grid.addWidget(assign_btn, 2, col)
-            clear_btn = QPushButton("Clear (legacy)")
-            grid.addWidget(clear_btn, 3, col)
-            label_lbl = QLabel("(legacy)")
-            label_lbl.setWordWrap(True)
-            label_lbl.setStyleSheet("color: #555; font-size: 9pt;")
-            grid.addWidget(label_lbl, 4, col, Qt.AlignTop)
-            assign_btn.clicked.connect(lambda _, k=key: self._assign_first_checked(k))
-            clear_btn.clicked.connect(lambda _, k=key: self._clear_slot(k))
-            self._slot_widgets[key] = {"kind_combo": kind_combo, "label_lbl": label_lbl}
-        gl.addLayout(grid)
+        for row_start in (0, 4):
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(6)
+            grid.setVerticalSpacing(2)
+            for col, key in enumerate(SLOT_KEYS[row_start:row_start + 4]):
+                slot_num = row_start + col + 1
+                grid.addWidget(QLabel(f"<b>{slot_num}: {key}</b>"), 0, col, Qt.AlignCenter)
+                kind_combo = QComboBox()
+                kind_combo.addItems(KIND_OPTIONS)
+                grid.addWidget(kind_combo, 1, col)
+                assign_btn = QPushButton("← Assign first checked")
+                grid.addWidget(assign_btn, 2, col)
+                clear_btn = QPushButton("Clear (legacy)")
+                grid.addWidget(clear_btn, 3, col)
+                label_lbl = QLabel("(legacy)")
+                label_lbl.setWordWrap(True)
+                label_lbl.setStyleSheet("color: #555; font-size: 9pt;")
+                grid.addWidget(label_lbl, 4, col, Qt.AlignTop)
+                assign_btn.clicked.connect(lambda _, k=key: self._assign_first_checked(k))
+                clear_btn.clicked.connect(lambda _, k=key: self._clear_slot(k))
+                self._slot_widgets[key] = {"kind_combo": kind_combo, "label_lbl": label_lbl}
+            gl.addLayout(grid)
         root.addWidget(gb)
 
         qa_btn.clicked.connect(self._quick_assign_same_kind)
@@ -408,23 +484,18 @@ class CompareRunsPanel(QWidget):
         self.selectionsChanged.emit(dict(self._selections))
 
     def _quick_assign_pair_kinds(self) -> None:
-        """Slots 1-2 = first 2 checked × F0trend; slots 3-4 = same × F0.
-
-        If only one run is checked, both halves use that run.
-        """
+        """Slots 1-4 = first 4 checked × F0trend; slots 5-8 = same runs × F0."""
         rows = self._checked_runs_in_order()
         if not rows:
             QMessageBox.information(self, "No checked runs",
                                     "Check at least one run in the Runs table first.")
             return
-        # Pad to 2 rows by repeating the first if only one checked
-        runs = (rows + [rows[0]])[:2]
-        kinds_per_slot = ((SLOT_KEYS[0], runs[0], "F0trend"),
-                          (SLOT_KEYS[1], runs[1], "F0trend"),
-                          (SLOT_KEYS[2], runs[0], "F0"),
-                          (SLOT_KEYS[3], runs[1], "F0"))
-        for slot_key, row, kind in kinds_per_slot:
-            self._assign(slot_key, row, kind)
+        # Up to 4 runs; pad by repeating the last if fewer checked.
+        runs = (rows * 4)[:4]
+        for slot_key, run_row in zip(SLOT_KEYS[:4], runs):
+            self._assign(slot_key, run_row, "F0trend")
+        for slot_key, run_row in zip(SLOT_KEYS[4:8], runs):
+            self._assign(slot_key, run_row, "F0")
         self._refresh_slot_labels()
         self.selectionsChanged.emit(dict(self._selections))
 

@@ -79,6 +79,8 @@ def _resolve_b_init(F_all, baseline_long, baseline_short, b_init_from, b_init_va
         if b_init_value is None:
             raise ValueError("b_init_from='scalar' requires b_init_value")
         return np.full(F_all.shape[0], float(b_init_value), dtype=F_all.dtype)
+    if b_init_from == "half_of_max_F_minus_min_F":
+        return (np.max(F_all, axis=1) - np.min(F_all, axis=1)) / 2.0
     raise ValueError(f"Unknown b_init_from: {b_init_from!r}")
 
 

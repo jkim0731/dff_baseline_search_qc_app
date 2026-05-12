@@ -12,9 +12,68 @@ One folder for **running baseline fits** and **curating them**. Two top-level pa
 The original `code/baseline_search/` package is preserved for notebooks that
 import it directly; the copy here keeps run + QC together.
 
+## Expected folder layout
+
+The app assumes this structure:
+
+```
+<runs_root>/               ← the parent; auto-detected from your inputs choice
+    index.csv              ← written by the runner; one row per run
+    0001_first_try/        ← numbered run folders
+    0002_cpos3_cneg3/
+    ...
+    first_try/             ← pick THIS as the inputs folder in the GUI
+        755252_2024-11-12/
+            F_all_array.npy
+            timestamps.npy
+            baseline_short_window_all_array.npy
+            baseline_long_window_all_array.npy
+            F0trend_all.npy
+            F0_all.npy
+            F_noise.npy  F_snr.npy  F_skewness.npy
+            bleaching_metric.npy  sustained_metric.npy
+            sczdrift_df_all.csv          (optional — ROI metadata)
+            <plane_id>_mean_img.npy
+            <plane_id>_max_img.npy
+            <plane_id>_roi_table.pkl
+        755252_2024-11-19/
+            ...
+```
+
+**The inputs folder** is the one that contains per-session subfolders (each
+with `F_all_array.npy`). Its **parent** is automatically treated as the runs
+root and is scanned for `index.csv` + numbered run folders.
+
+> Example: if you pick `/results/runs/first_try/` as the inputs folder, the
+> app will look for runs in `/results/runs/`.
+
+## QC the fits
+
+```bash
+cd code/dff_baseline_search_qc_app
+python main.py
+```
+
+A single folder picker appears — select the **inputs folder** (e.g.
+`/results/runs/first_try/`). The app then:
+
+1. Lists all session subfolders found inside it.
+2. Automatically scans the parent directory for run folders and populates the
+   compare panel.
+
+Compare panel features:
+- Check the runs you want to compare; the *Differences* table auto-shows only
+  recipe parameters that disagree across the checked runs.
+- Quick-assign maps the first N checked runs into slots 1..4 with one click.
+- When slots are assigned, the session dropdown is restricted to the
+  intersection of sessions present in every selected run.
+
+Keyboard: `J` prev · `K` next · `S` save · `Space` save+next · `R` toggle
+compare mode · `1`–`4` toggle slot traces.
+
 ## Run a fit
 
-From inside `code/dff_baseline_search_app/`:
+From inside `code/dff_baseline_search_qc_app/`:
 
 ```bash
 python -m baseline_search.run \
@@ -25,62 +84,22 @@ python -m baseline_search.run \
     --sessions 755252_2024-11-19
 ```
 
-Outputs:
+Outputs land in `/results/runs/0001_first_try_replication/` (auto-numbered)
+and a row is appended to `/results/runs/index.csv`.
 
-```
-/results/runs/0001_first_try_replication/
-    recipe.json                      # canonical, validated by Pydantic
-    metadata.json                    # created_at, host, git_rev, sessions[]
-    755252_2024-11-19/
-        F0trend_all.npy   (N, T) float32
-        F0_all.npy        (N, T) float64
-        res_all.npy       (N, n_params)
-        loss_all.npy      (N,)
-        info.json
-```
+Available recipes in `baseline_search/recipes/`:
 
-A row is appended to `/results/runs/index.csv` with the recipe leaves flattened
-(`recipe_sigma_method`, `recipe_M_c_pos`, …). The QC app reads this file.
-
-## QC the fits
-
-```bash
-python main.py
-```
-
-Picks parent_dir (per-session inputs), then one or more runs folders, then
-launches the GUI. The compare-mode dock opens by default and reads the runs
-indices from every chosen source.
-
-Compare panel features:
-- Multiple sources with per-source diagnostics ("looks like an inputs folder",
-  "no index.csv", "2 runs", …) so empty results are explainable at a glance.
-- Check the runs you want to compare; the *Differences* table auto-shows only
-  recipe parameters that disagree across the checked runs.
-- Quick-assign maps the first N checked runs into slots 1..4 with one click.
-- When slots are assigned, the session dropdown is restricted to the
-  intersection of sessions present in every selected run.
-
-Keyboard: `J` prev · `K` next · `S` save · `Space` save+next · `R` toggle
-compare mode · `1`–`4` toggle slot traces.
-
-## Inputs layout
-
-```
-<parent_dir>/
-  <subject>_<YYYY-MM-DD>/
-    F_all_array.npy
-    baseline_short_window_all_array.npy
-    baseline_long_window_all_array.npy
-    F0_all.npy
-    F0trend_all.npy
-    timestamps.npy
-    F_noise.npy  F_snr.npy  F_skewness.npy
-    bleaching_metric.npy  sustained_metric.npy
-    sczdrift_df_all.csv
-    <plane_id>_mean_img.npy  <plane_id>_max_img.npy
-    <plane_id>_roi_table.pkl
-```
+| File | c_pos | c_neg | fluctuations |
+|------|-------|-------|--------------|
+| `first_try.json` | 2 | 3 | lowess |
+| `cpos2_cneg4_lowess.json` | 2 | 4 | lowess |
+| `cpos2_cneg5_lowess.json` | 2 | 5 | lowess |
+| `cpos3_cneg3_lowess.json` | 3 | 3 | lowess |
+| `cpos3_cneg4_lowess.json` | 3 | 4 | lowess |
+| `cpos3_cneg5_lowess.json` | 3 | 5 | lowess |
+| `cpos4_cneg4_lowess.json` | 4 | 4 | lowess |
+| `cpos4_cneg5_lowess.json` | 4 | 5 | lowess |
+| `percentile_variant.json` | 3 | 3 | percentile |
 
 ## Install
 

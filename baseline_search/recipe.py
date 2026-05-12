@@ -57,6 +57,7 @@ class BiexpBrightDefaultX0(_StrictModel):
         "mean_F_minus_short_baseline",
         "zero",
         "scalar",
+        "half_of_max_F_minus_min_F",
     ] = "mean_F_minus_long_baseline"
     b_init_value: Optional[float] = None  # required iff b_init_from == "scalar"
     t_fast_init: float = 60.0

@@ -22,6 +22,7 @@ METRIC_DISPLAY = {
 }
 
 
+
 @dataclass
 class SessionData:
     session_key: str
@@ -41,12 +42,19 @@ class SessionData:
 def _safe_dff(F: np.ndarray, baseline: np.ndarray) -> np.ndarray:
     F = np.asarray(F, dtype=np.float32)
     b = np.asarray(baseline, dtype=np.float32)
-    safe = np.abs(b) > 1e-6
-    return np.where(safe, (F - b) / np.where(safe, b, 1.0), 0.0).astype(np.float32)
+    nan_mask = np.isnan(b)
+    safe = (~nan_mask) & (np.abs(b) > 1e-6)
+    result = np.where(safe, (F - b) / np.where(safe, b, 1.0), 0.0).astype(np.float32)
+    result[nan_mask] = np.nan
+    return result
 
 
 def list_sessions(parent_dir: Path = DEFAULT_PARENT_DIR) -> list[Path]:
-    return sorted(p for p in Path(parent_dir).iterdir() if p.is_dir())
+    """Return subdirs that look like input session folders (contain F_all_array.npy)."""
+    return sorted(
+        p for p in Path(parent_dir).iterdir()
+        if p.is_dir() and (p / "F_all_array.npy").exists()
+    )
 
 
 _BASELINE_FILES = {
@@ -64,8 +72,21 @@ _PRECOMP_DFF_FILES = {
 @lru_cache(maxsize=8)
 def load_session(session_path_str: str) -> SessionData:
     p = Path(session_path_str)
-    rois = pd.read_csv(p / "sczdrift_df_all.csv")
+    if not (p / "F_all_array.npy").exists():
+        raise FileNotFoundError(
+            f"{p} does not look like a session inputs folder "
+            f"(F_all_array.npy not found). "
+            f"Did you select a runs folder instead of the inputs folder?"
+        )
     F = np.load(p / "F_all_array.npy", mmap_mode="r")
+    roi_csv = p / "sczdrift_df_all.csv"
+    if roi_csv.exists():
+        rois = pd.read_csv(roi_csv)
+    else:
+        rois = pd.DataFrame({
+            "plane_id":    ["unknown"] * F.shape[0],
+            "cell_roi_id": list(range(F.shape[0])),
+        })
     ts_path = p / "timestamps.npy"
     timestamps = np.load(ts_path) if ts_path.exists() else np.arange(F.shape[1], dtype=np.float32)
 

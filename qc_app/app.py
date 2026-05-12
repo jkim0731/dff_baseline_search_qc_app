@@ -12,7 +12,8 @@ from PyQt5.QtGui import QKeyEvent
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDockWidget, QDoubleSpinBox,
     QFileDialog, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog,
-    QLabel, QMainWindow, QPushButton, QSlider, QSplitter, QVBoxLayout, QWidget,
+    QLabel, QMainWindow, QMessageBox, QPushButton, QSlider, QSplitter,
+    QVBoxLayout, QWidget,
 )
 
 from .curation import DEFAULT_PATH, derive_category, load_curation, lookup_decision, save_decision
@@ -20,7 +21,7 @@ from .data import (
     DEFAULT_DATA_DIR, DEFAULT_PARENT_DIR, _safe_dff, aggregate_metrics,
     list_sessions, load_session,
 )
-from .rois import crop_around_mask, get_roi_mask, load_plane_assets, normalize_for_display
+from .rois import crop_around_mask, get_roi_mask, load_plane_assets
 from .runs import DEFAULT_RUNS_DIR, list_run_sessions, load_run_baseline
 from .runs_panel import CompareRunsPanel
 
@@ -30,14 +31,23 @@ BASELINE_COLORS = {
     "long":    "#2ca02c",
     "F0trend": "#ff7f0e",
     "F0":      "#d62728",
+    "run5":    "#9467bd",
+    "run6":    "#17becf",
+    "run7":    "#bcbd22",
+    "run8":    "#e377c2",
 }
 DFF_COLORS = {
     "short":   "#1f77b4",
     "long":    "#2ca02c",
-    "F0trend": "#ff7f0e",   # same orange as F baseline
-    "F0":      "#d62728",   # same red as F baseline
+    "F0trend": "#ff7f0e",
+    "F0":      "#d62728",
+    "run5":    "#9467bd",
+    "run6":    "#17becf",
+    "run7":    "#bcbd22",
+    "run8":    "#e377c2",
 }
-TRACE_KEYS  = ["short", "long", "F0trend", "F0"]   # order matches keys 1-4
+TRACE_KEYS = ["short", "long", "F0trend", "F0",
+              "run5", "run6", "run7", "run8"]   # order matches keys 1-8
 METRIC_NAMES = ["noise", "snr", "bleaching", "sustained", "skewness"]
 MASK_COLOR = (255, 32, 32, 110)   # RGBA
 
@@ -55,6 +65,17 @@ def _make_pen(color, width=1, style=Qt.SolidLine):
     return pen
 
 
+def _mask_contour(mask: np.ndarray) -> np.ndarray:
+    """1-pixel inner contour: mask pixels that have at least one 4-neighbour outside the mask."""
+    interior = np.zeros_like(mask)
+    interior[1:-1, 1:-1] = (
+        mask[1:-1, 1:-1] &
+        mask[:-2, 1:-1] & mask[2:, 1:-1] &
+        mask[1:-1, :-2] & mask[1:-1, 2:]
+    )
+    return mask & ~interior
+
+
 # ── custom ViewBox: scroll → X zoom only; Shift+scroll → Y zoom only ─────────
 
 class _ShiftYViewBox(pg.ViewBox):
@@ -68,84 +89,153 @@ class _ShiftYViewBox(pg.ViewBox):
 # ── trace panel ───────────────────────────────────────────────────────────────
 
 class TracePanel(QWidget):
-    """F + dFF plots with external legend row and shared trace toggles."""
+    """F + dFF plots with 2-row legend, hover tooltip, color picker."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._colors: dict[str, str] = dict(BASELINE_COLORS)  # mutable per-instance
+        self._color_menu_built = False
+        self._available_keys: set[str] = set(TRACE_KEYS)
+        self._current_data_keys: set[str] = set()  # keys with non-empty data in curves
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
 
-        # ── legend row ────────────────────────────────────────────────────────
-        legend_row = QHBoxLayout()
-        legend_row.setSpacing(4)
+        # ── legend: grid of buttons + controls row ────────────────────────────
         self._legend_btns: dict[str, QPushButton] = {}
+        self._legend_ncols = 4   # dynamically adjusted in _relayout_legend()
+        legend_area = QVBoxLayout()
+        legend_area.setSpacing(1)
 
-        # static "F" label
+        # Controls row — separate so it never gets displaced by button wrapping
+        ctrl_row = QHBoxLayout(); ctrl_row.setSpacing(4)
         f_lbl = QLabel("F")
         f_lbl.setStyleSheet("color:#222; font-size:9pt; font-weight:bold;")
-        legend_row.addWidget(f_lbl)
-
-        for i, name in enumerate(TRACE_KEYS, start=1):
-            r, g, b = _pg_color(BASELINE_COLORS[name])
-            luma = 0.299 * r + 0.587 * g + 0.114 * b
-            txt = "white" if luma < 160 else "black"
-            btn = QPushButton(f"{i}:{name}")
-            btn.setCheckable(True)
-            btn.setChecked(True)
-            btn.setFixedHeight(18)
-            btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: rgb({r},{g},{b}); color: {txt};
-                    border: none; padding: 1px 7px; font-size: 9pt;
-                    border-radius: 3px;
-                }}
-                QPushButton:!checked {{
-                    background: #ccc; color: #999;
-                }}
-            """)
-            btn.toggled.connect(lambda checked, n=name: self._on_toggle(n, checked))
-            self._legend_btns[name] = btn
-            legend_row.addWidget(btn)
-
-        legend_row.addStretch()
-        legend_row.addWidget(QLabel("dFF α:"))
+        ctrl_row.addWidget(f_lbl)
+        ctrl_row.addStretch()
+        ctrl_row.addWidget(QLabel("dFF opacity:"))
         self._alpha_sl = QSlider(Qt.Horizontal)
         self._alpha_sl.setRange(10, 100)
         self._alpha_sl.setValue(70)
         self._alpha_sl.setFixedWidth(70)
         self._alpha_sl.setFixedHeight(16)
         self._alpha_sl.valueChanged.connect(self._on_alpha_changed)
-        legend_row.addWidget(self._alpha_sl)
+        ctrl_row.addWidget(self._alpha_sl)
         self._home_btn = QPushButton("Home")
         self._home_btn.setFixedHeight(18)
         self._home_btn.clicked.connect(self._home)
-        legend_row.addWidget(self._home_btn)
-        layout.addLayout(legend_row)
+        ctrl_row.addWidget(self._home_btn)
+        legend_area.addLayout(ctrl_row)
 
-        # ── plots ─────────────────────────────────────────────────────────────
-        self.f_plot   = pg.PlotWidget(viewBox=_ShiftYViewBox(),
-                                      title="Corrected F + baselines")
-        self.dff_plot = pg.PlotWidget(viewBox=_ShiftYViewBox(), title="dFF")
+        # Trace buttons in a QGridLayout — reflows when compare labels are long
+        self._legend_grid_widget = QWidget()
+        self._legend_grid = QGridLayout(self._legend_grid_widget)
+        self._legend_grid.setContentsMargins(0, 0, 0, 0)
+        self._legend_grid.setSpacing(3)
+        for i, name in enumerate(TRACE_KEYS, start=1):
+            btn = self._make_legend_btn(i, name)
+            self._legend_grid.addWidget(btn, (i - 1) // 4, (i - 1) % 4)
+        legend_area.addWidget(self._legend_grid_widget)
+
+        layout.addLayout(legend_area)
+
+        # ── plots — single GraphicsLayoutWidget so both repaint in one pass ─────
+        self._trace_glw = pg.GraphicsLayoutWidget()
+        self.f_plot   = self._trace_glw.addPlot(
+            row=0, col=0, viewBox=_ShiftYViewBox(), title="Corrected F + baselines")
+        self.dff_plot = self._trace_glw.addPlot(
+            row=1, col=0, viewBox=_ShiftYViewBox(), title="dFF")
         self.dff_plot.setXLink(self.f_plot)
 
-        for pw in (self.f_plot, self.dff_plot):
-            pw.setLabel("bottom", "time (s)")
-            pw.showGrid(x=False, y=True, alpha=0.2)
-            pw.setDownsampling(auto=True, mode="peak")
-            pw.setClipToView(True)
+        for pi in (self.f_plot, self.dff_plot):
+            pi.setLabel("bottom", "time (s)")
+            pi.showGrid(x=False, y=True, alpha=0.2)
+            pi.setDownsampling(auto=True, mode="peak")
+            pi.setClipToView(True)
 
         self.f_plot.setLabel("left", "F")
         self.dff_plot.setLabel("left", "dFF")
-        self.f_plot.setMinimumHeight(220)
-        self.dff_plot.setMinimumHeight(160)
 
-        layout.addWidget(self.f_plot,   stretch=4)
-        layout.addWidget(self.dff_plot, stretch=3)
+        # Approximate the 4:3 height split used previously
+        self._trace_glw.ci.layout.setRowStretchFactor(0, 4)
+        self._trace_glw.ci.layout.setRowStretchFactor(1, 3)
+
+        layout.addWidget(self._trace_glw)
 
         self._f_curves:   dict[str, pg.PlotDataItem] = {}
         self._dff_curves: dict[str, pg.PlotDataItem] = {}
-        self._dff_alpha = 178   # 70 / 100 * 255
+        self._dff_alpha = 178
+
+    # ── legend button factory ─────────────────────────────────────────────────
+
+    def _make_legend_btn(self, i: int, name: str) -> QPushButton:
+        btn = QPushButton(f"{i}:{name}")
+        btn.setCheckable(True)
+        btn.setChecked(True)
+        btn.setFixedHeight(18)
+        self._apply_btn_style(btn, self._colors.get(name, "#888888"))
+        btn.toggled.connect(lambda checked, n=name: self._on_toggle(n, checked))
+        btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        btn.customContextMenuRequested.connect(lambda pos, n=name: self._pick_color(n))
+        self._legend_btns[name] = btn
+        return btn
+
+    def _apply_btn_style(self, btn: QPushButton, color_hex: str) -> None:
+        r, g, b = _pg_color(color_hex)
+        luma = 0.299 * r + 0.587 * g + 0.114 * b
+        txt = "white" if luma < 160 else "black"
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgb({r},{g},{b}); color: {txt};
+                border: none; padding: 1px 7px; font-size: 9pt;
+                border-radius: 3px;
+            }}
+            QPushButton:!checked {{ background: #ccc; color: #999; }}
+        """)
+
+    # ── color picker ──────────────────────────────────────────────────────────
+
+    def _pick_color(self, name: str) -> None:
+        from PyQt5.QtGui import QColor
+        from PyQt5.QtWidgets import QColorDialog
+        current = QColor(self._colors.get(name, "#888888"))
+        color = QColorDialog.getColor(current, self, f"Color for: {name}")
+        if not color.isValid():
+            return
+        self._colors[name] = color.name()
+        btn = self._legend_btns.get(name)
+        if btn is not None:
+            self._apply_btn_style(btn, color.name())
+        self._apply_curve_pen(name)
+
+    # ── pen management ────────────────────────────────────────────────────────
+
+    def _apply_curve_pen(self, name: str) -> None:
+        hex_c = self._colors.get(name, "#888888")
+        if name in self._f_curves:
+            self._f_curves[name].setPen(_make_pen(_pg_color(hex_c), width=2))
+        if name in self._dff_curves:
+            r, g, b = _pg_color(hex_c)
+            self._dff_curves[name].setPen(_make_pen((r, g, b, self._dff_alpha), width=2))
+
+    # ── plot color submenu ────────────────────────────────────────────────────
+
+    def _build_plot_color_menu(self) -> None:
+        for pw in (self.f_plot, self.dff_plot):
+            try:
+                vb_menu = pw.getViewBox().menu
+                if vb_menu is None:
+                    continue
+                vb_menu.addSeparator()
+                color_sub = vb_menu.addMenu("Set trace color…")
+                for name in TRACE_KEYS:
+                    act = color_sub.addAction(name)
+                    act.triggered.connect(lambda _, n=name: self._pick_color(n))
+            except Exception:
+                pass
+
+    # ── curve initialisation ──────────────────────────────────────────────────
 
     def init_curves(self):
         self.f_plot.clear()
@@ -153,25 +243,35 @@ class TracePanel(QWidget):
         self._f_curves = {}
         self._dff_curves = {}
 
+        # Use plot() so each item is a PlotDataItem that inherits the PlotItem's
+        # autoDownsample and clipToView settings (set above). Width=2 is fast
+        # because useOpenGL=True offloads stroke rendering to the GPU.
         self._f_curves["F"] = self.f_plot.plot(pen=_make_pen("#222", width=1))
 
-        for name, color in BASELINE_COLORS.items():
-            self._f_curves[name] = self.f_plot.plot(
-                pen=_make_pen(_pg_color(color), width=2))
+        for name in TRACE_KEYS:
+            c = self.f_plot.plot(
+                pen=_make_pen(_pg_color(self._colors.get(name, "#888")), width=2),
+            )
+            self._f_curves[name] = c
 
         zero = pg.InfiniteLine(pos=0, angle=0,
                                pen=pg.mkPen(color=(180, 180, 180), width=1,
                                             style=Qt.DashLine))
         self.dff_plot.addItem(zero)
 
-        for name, color in DFF_COLORS.items():
-            r, g, b = _pg_color(color)
-            curve = self.dff_plot.plot(
-                pen=_make_pen((r, g, b, self._dff_alpha), width=1))
-            self._dff_curves[name] = curve
+        for name in TRACE_KEYS:
+            r, g, b = _pg_color(self._colors.get(name, "#888"))
+            c = self.dff_plot.plot(
+                pen=_make_pen((r, g, b, self._dff_alpha), width=2),
+            )
+            self._dff_curves[name] = c
+
+        # Color submenu in plot context menu (only added once)
+        if not self._color_menu_built:
+            self._build_plot_color_menu()
+            self._color_menu_built = True
 
     def toggle_trace(self, name: str):
-        """Toggle a named trace in both plots (driven by button or key press)."""
         btn = self._legend_btns.get(name)
         if btn:
             btn.setChecked(not btn.isChecked())
@@ -184,41 +284,69 @@ class TracePanel(QWidget):
     def _on_alpha_changed(self, value: int):
         self._dff_alpha = int(value / 100 * 255)
         for name, curve in self._dff_curves.items():
-            r, g, b = _pg_color(DFF_COLORS[name])
-            curve.setPen(_make_pen((r, g, b, self._dff_alpha), width=1))
+            r, g, b = _pg_color(self._colors.get(name, "#888"))
+            curve.setPen(_make_pen((r, g, b, self._dff_alpha), width=2))
 
     def _home(self):
         self.f_plot.enableAutoRange()
         self.dff_plot.enableAutoRange()
 
     def set_available_keys(self, keys: list[str]):
-        """Show/hide legend buttons and clear curves for keys not in this session."""
+        self._available_keys = set(keys)
         empty = np.array([])
         for name, btn in self._legend_btns.items():
-            available = name in keys
+            available = name in self._available_keys
             btn.setVisible(available)
             if not available:
                 if name in self._f_curves:
                     self._f_curves[name].setData(empty, empty)
                 if name in self._dff_curves:
                     self._dff_curves[name].setData(empty, empty)
+        # Reset tracking so update() re-evaluates transitions on next call
+        self._current_data_keys = set()
 
     def set_slot_label(self, slot_key: str, label: str | None):
-        """Override the legend button text for one slot (None → restore default)."""
         btn = self._legend_btns.get(slot_key)
         if btn is None:
             return
-        i = list(self._legend_btns).index(slot_key) + 1   # match 1-based hotkeys
+        i = list(self._legend_btns).index(slot_key) + 1
         btn.setText(f"{i}:{slot_key}" if label is None else f"{i}:{label}")
+        self._relayout_legend()
+
+    def _relayout_legend(self) -> None:
+        """Switch between 4-col and 2-col grid based on longest button label."""
+        max_len = max(len(btn.text()) for btn in self._legend_btns.values())
+        ncols = 4 if max_len <= 12 else 2
+        if ncols == self._legend_ncols:
+            return
+        self._legend_ncols = ncols
+        for i, btn in enumerate(self._legend_btns.values()):
+            self._legend_grid.addWidget(btn, i // ncols, i % ncols)
+        # After moving widgets Qt may have stale effective-visibility state;
+        # re-apply the current visibility for every button unconditionally.
+        for name, btn in self._legend_btns.items():
+            btn.setVisible(name in self._available_keys)
 
     def update(self, timestamps, F, baselines, dffs):
+        empty = np.array([])
         self._f_curves["F"].setData(timestamps, F)
-        for name, trace in baselines.items():
-            if name in self._f_curves:
-                self._f_curves[name].setData(timestamps, trace)
-        for name, trace in dffs.items():
-            if name in self._dff_curves:
-                self._dff_curves[name].setData(timestamps, trace)
+        new_data_keys = set(baselines) | set(dffs)
+        for name in TRACE_KEYS:
+            had_data = name in self._current_data_keys
+            has_f    = name in baselines
+            has_dff  = name in dffs
+            if has_f and name in self._f_curves:
+                self._f_curves[name].setData(timestamps, baselines[name])
+            elif had_data and name in self._f_curves:
+                self._f_curves[name].setData(empty, empty)
+            if has_dff and name in self._dff_curves:
+                self._dff_curves[name].setData(timestamps, dffs[name])
+            elif had_data and name in self._dff_curves:
+                self._dff_curves[name].setData(empty, empty)
+            # Button visibility is managed solely by set_available_keys; do not
+            # hide buttons here based on data presence — that caused slots 5/7
+            # to stay invisible after assignment due to stale Qt visibility state.
+        self._current_data_keys = new_data_keys
 
 
 # ── bi-state text toggle ─────────────────────────────────────────────────────
@@ -409,10 +537,11 @@ class ImagePanel(QWidget):
         rgba = np.stack([gray8, gray8, gray8,
                          np.full((h, w), 255, dtype=np.uint8)], axis=-1)
         if self.mask_chk.isChecked() and mask.any():
-            rgba[mask, 0] = MASK_COLOR[0]
-            rgba[mask, 1] = MASK_COLOR[1]
-            rgba[mask, 2] = MASK_COLOR[2]
-            rgba[mask, 3] = 255
+            contour = _mask_contour(mask)
+            rgba[contour, 0] = MASK_COLOR[0]
+            rgba[contour, 1] = MASK_COLOR[1]
+            rgba[contour, 2] = MASK_COLOR[2]
+            rgba[contour, 3] = 255
         self.img_item.setImage(rgba.transpose(1, 0, 2))
         self.img_plot.autoRange()
 
@@ -420,31 +549,36 @@ class ImagePanel(QWidget):
 # ── metric histograms ─────────────────────────────────────────────────────────
 
 class MetricHistograms(QWidget):
-    """Five compact histograms showing per-metric distributions with current ROI marked."""
+    """Compact histograms — all in one GraphicsLayoutWidget so a single repaint
+    covers every histogram when the marker line moves."""
+
+    _ROW_H = 82  # pixels per histogram row
 
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
+        layout.setSpacing(0)
 
-        self._plots: dict[str, pg.PlotWidget] = {}
+        self._plots: dict[str, pg.PlotItem] = {}
         self._lines: dict[str, pg.InfiniteLine] = {}
         self._all_metrics: dict[str, np.ndarray] = {}
 
-        for name in METRIC_NAMES:
-            pw = pg.PlotWidget()
-            pw.setTitle(name, size="8pt")
-            pw.setFixedHeight(68)
-            pw.hideAxis("left")
-            pw.getAxis("bottom").setStyle(tickTextOffset=2)
-            pw.setMouseEnabled(x=False, y=False)
-            pw.setMenuEnabled(False)
-            line = pg.InfiniteLine(angle=90, pen=pg.mkPen("r", width=2))
-            pw.addItem(line)
-            self._plots[name] = pw
+        glw = pg.GraphicsLayoutWidget()
+        glw.setFixedHeight(len(METRIC_NAMES) * self._ROW_H)
+        layout.addWidget(glw)
+
+        for i, name in enumerate(METRIC_NAMES):
+            pi = glw.addPlot(row=i, col=0)
+            pi.setTitle(name, size="8pt")
+            pi.hideAxis("left")
+            pi.getAxis("bottom").setStyle(tickTextOffset=2)
+            pi.setMouseEnabled(x=False, y=False)
+            pi.setMenuEnabled(False)
+            line = pg.InfiniteLine(angle=90, pen=pg.mkPen("r", width=1))
+            pi.addItem(line)
+            self._plots[name] = pi
             self._lines[name] = line
-            layout.addWidget(pw)
 
     def load_all(self, agg_df):
         """Pre-compute histogram bars from aggregate metrics DataFrame."""
@@ -456,19 +590,16 @@ class MetricHistograms(QWidget):
         self._rebuild_bars()
 
     def _rebuild_bars(self):
-        for name, pw in self._plots.items():
-            pw.clear()
-            # re-add the infinite line after clear
-            line = self._lines[name]
-            pw.addItem(line)
+        for name, pi in self._plots.items():
+            pi.clear()
+            pi.addItem(self._lines[name])
             vals = self._all_metrics.get(name)
             if vals is None or len(vals) == 0:
                 continue
             counts, edges = np.histogram(vals, bins=60)
-            bar = pg.BarGraphItem(
+            pi.addItem(pg.BarGraphItem(
                 x0=edges[:-1], x1=edges[1:], height=counts,
-                brush=pg.mkBrush(136, 136, 136, 180), pen=None)
-            pw.addItem(bar)
+                brush=pg.mkBrush(136, 136, 136, 180), pen=None))
 
     def mark_roi(self, metrics_row: dict):
         for name in METRIC_NAMES:
@@ -558,8 +689,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"dFF Baseline QC — {user}" if user else "dFF Baseline QC")
         # Width is resizable, height is fixed so the curation row at the bottom
         # is always visible (compare dock pops out as its own floating window).
-        self.resize(1200, 680)
-        self.setFixedHeight(680)
+        self.resize(1200, 720)
 
         # state
         self._all_sessions: list[Path] = list_sessions(self.parent_dir)
@@ -675,6 +805,11 @@ class MainWindow(QMainWindow):
             )
             self.addDockWidget(Qt.BottomDockWidgetArea, self.compare_dock)
             self.compare_dock.setFloating(True)
+            # Remove Qt.Tool so the floating dock can go behind the main window.
+            self.compare_dock.setWindowFlags(
+                Qt.Window | Qt.WindowCloseButtonHint | Qt.WindowMinimizeButtonHint
+            )
+            self.compare_dock.topLevelChanged.connect(self._on_dock_toplevel_changed)
             # Place beside the main window with a sensible default size
             self.compare_dock.resize(1100, 460)
             self.compare_dock.hide()   # hidden by default — toggle via "Compare mode (R)"
@@ -693,6 +828,15 @@ class MainWindow(QMainWindow):
             )
             self.compare_panel.selectionsChanged.connect(self._on_compare_selections)
 
+    def _on_dock_toplevel_changed(self, floating: bool):
+        if floating:
+            # Re-apply Qt.Window so the dock behaves as a normal window
+            # (can go behind the main window) rather than a always-on-top tool.
+            self.compare_dock.setWindowFlags(
+                Qt.Window | Qt.WindowCloseButtonHint | Qt.WindowMinimizeButtonHint
+            )
+            self.compare_dock.show()
+
     def _set_compare_mode(self, on: bool):
         if self.compare_dock is None:
             return
@@ -702,20 +846,20 @@ class MainWindow(QMainWindow):
 
     def _on_compare_selections(self, selections: dict):
         self._slot_overrides = selections
-        for slot_key in ("short", "long", "F0trend", "F0"):
+        for slot_key in TRACE_KEYS:
             sel = self._slot_overrides.get(slot_key)
             self.trace_panel.set_slot_label(
                 slot_key, None if sel is None else sel[2]
             )
-        self._apply_session_intersection_filter()
-        self._refresh_roi()
+        already_refreshed = self._apply_session_intersection_filter()
+        if not already_refreshed:
+            self._refresh_roi()
 
-    def _apply_session_intersection_filter(self) -> None:
+    def _apply_session_intersection_filter(self) -> bool:
         """Restrict sess_combo to sessions present in every assigned run.
 
-        With no overrides, restores the full session list from parent_dir.
-        If the current session is no longer compatible, jumps to the first
-        compatible one (or shows an empty state if none exist).
+        Returns True if it already called _refresh_roi (via _load_session) so
+        the caller can avoid a redundant second refresh.
         """
         if not self._slot_overrides:
             new_sessions = list(self._all_sessions)
@@ -729,11 +873,11 @@ class MainWindow(QMainWindow):
                     f"{len(new_sessions)}/{len(self._all_sessions)} sessions "
                     f"shared across {len(run_dirs)} run(s)")
 
-        # No-op fast path
+        # No-op fast path — session list unchanged, no refresh needed here
         if [p.name for p in new_sessions] == [p.name for p in self._sessions]:
             if note:
                 self.status_label.setText(note.lstrip("  ·  "))
-            return
+            return False
 
         cur_name = self._sessions[self._sess_idx].name if self._sessions else None
         self._sessions = new_sessions
@@ -749,8 +893,9 @@ class MainWindow(QMainWindow):
                 "No sessions are shared across the selected runs — "
                 "uncheck or reassign slots."
             )
-            return
-        # Try to keep the user on the same session; otherwise jump to first
+            return False
+        # Try to keep the user on the same session; otherwise jump to first.
+        # _load_session calls _refresh_roi internally.
         names = [p.name for p in self._sessions]
         if cur_name in names:
             self._load_session(names.index(cur_name))
@@ -758,6 +903,7 @@ class MainWindow(QMainWindow):
             self._load_session(0)
         if note:
             self.status_label.setText(note.lstrip("  ·  "))
+        return True
 
     # ── data loading ──────────────────────────────────────────────────────────
 
@@ -769,8 +915,8 @@ class MainWindow(QMainWindow):
         self.sess_combo.blockSignals(True)
         self.sess_combo.setCurrentIndex(idx)
         self.sess_combo.blockSignals(False)
-        # In runs-comparison mode, all 4 slots are always available (legacy or overridden).
-        keys = (["short", "long", "F0trend", "F0"]
+        # In runs-comparison mode, all 8 slots are always available (legacy or overridden).
+        keys = (TRACE_KEYS
                 if self._runs_dirs
                 else list(self._session_data.baselines.keys()))
         self.trace_panel.set_available_keys(keys)
@@ -799,11 +945,9 @@ class MainWindow(QMainWindow):
         self.plane_label.setText(f"plane: {plane_id}")
         self.roiid_label.setText(f"cell_roi_id: {cell_roi_id}")
         try:
-            plane    = load_plane_assets(str(sd.path), plane_id)
-            mask     = get_roi_mask(plane, cell_roi_id)
-            max_norm  = normalize_for_display(plane.max_img)
-            mean_norm = normalize_for_display(plane.mean_img)
-            self.image_panel.set_roi(max_norm, mean_norm, mask)
+            plane = load_plane_assets(str(sd.path), plane_id)
+            mask  = get_roi_mask(str(sd.path), plane_id, cell_roi_id)
+            self.image_panel.set_roi(plane.max_norm, plane.mean_norm, mask)
         except Exception as e:
             self.status_label.setText(f"[image error: {e}]")
 
@@ -836,12 +980,12 @@ class MainWindow(QMainWindow):
     def _build_slot_traces(self, sd, idx: int, F: np.ndarray):
         """Per-slot (baseline, dff) for the current ROI.
 
-        For each of the 4 slot keys, prefer an override mapped to a run folder;
+        For each of the 8 slot keys, prefer an override mapped to a run folder;
         otherwise fall back to ``sd.baselines[slot_key]`` (legacy, may be absent).
         """
         baselines: dict = {}
         dffs: dict = {}
-        for slot_key in ("short", "long", "F0trend", "F0"):
+        for slot_key in TRACE_KEYS:
             override = self._slot_overrides.get(slot_key)
             if override is not None:
                 run_dir, kind, _label = override
@@ -973,6 +1117,14 @@ class MainWindow(QMainWindow):
             self.trace_panel.toggle_trace("F0trend")
         elif key == Qt.Key_4:
             self.trace_panel.toggle_trace("F0")
+        elif key == Qt.Key_5:
+            self.trace_panel.toggle_trace("run5")
+        elif key == Qt.Key_6:
+            self.trace_panel.toggle_trace("run6")
+        elif key == Qt.Key_7:
+            self.trace_panel.toggle_trace("run7")
+        elif key == Qt.Key_8:
+            self.trace_panel.toggle_trace("run8")
         elif key == Qt.Key_M:
             self.image_panel.mask_chk.toggle()
         elif key == Qt.Key_Z:
@@ -989,59 +1141,48 @@ class MainWindow(QMainWindow):
 
 # ── entry point ───────────────────────────────────────────────────────────────
 
-DEFAULT_RUNS_PARENT_DIR = Path("/results/runs/first_try")
-
-
 def _pick_dir(title: str, start: Path) -> Path | None:
     start_str = str(start) if start.exists() else str(Path.home())
     chosen = QFileDialog.getExistingDirectory(None, title, start_str)
     return Path(chosen) if chosen else None
 
 
-def _pick_dirs_loop(start: Path) -> list[Path]:
-    """Pick one or more runs folders.
-
-    The first picker is required-cancellable: cancel the first dialog and the
-    user has skipped compare mode (returns []). After a folder is picked, we
-    repeatedly ask "Add another?" until the user clicks Cancel.
-    """
-    out: list[Path] = []
-    title = "Select runs folder #1 (Cancel to skip compare mode)"
-    while True:
-        chosen = _pick_dir(title, start)
-        if chosen is None:
-            return out
-        if chosen not in out:
-            out.append(chosen)
-        title = (
-            f"Pick another runs folder (currently: {len(out)} selected) "
-            "— Cancel when done"
-        )
-
-
 def run(parent_dir: Path | None = None,
         data_dir:   Path = DEFAULT_DATA_DIR,
         output:     Path | None = None,
-        runs_dir:   Path | None = None,
         runs_dirs:  list[Path] | None = None):
     pg.setConfigOptions(background="w", foreground="k",
-                        antialias=False, useOpenGL=False)
+                        antialias=False, useOpenGL=True)
     app = QApplication.instance() or QApplication(sys.argv)
 
     if parent_dir is None:
-        parent_dir = _pick_dir(
-            "Select session data folder (parent of <session>/F_all_array.npy …)",
-            DEFAULT_RUNS_PARENT_DIR if DEFAULT_RUNS_PARENT_DIR.exists() else DEFAULT_PARENT_DIR,
-        )
-        if parent_dir is None:
-            sys.exit(0)
+        start = DEFAULT_RUNS_DIR if DEFAULT_RUNS_DIR.exists() else DEFAULT_PARENT_DIR
+        msg = None
+        while True:
+            title = (
+                "Select inputs folder (contains session subfolders with F_all_array.npy)"
+                if msg is None else
+                f"⚠ {msg} — pick again, or Cancel to quit"
+            )
+            parent_dir = _pick_dir(title, start)
+            if parent_dir is None:
+                sys.exit(0)
+            sessions = list_sessions(parent_dir)
+            if sessions:
+                break
+            # Diagnose why nothing was found
+            subdirs = [p for p in parent_dir.iterdir() if p.is_dir()] if parent_dir.exists() else []
+            if not subdirs:
+                msg = f"'{parent_dir.name}' is empty"
+            elif any((d / "recipe.json").exists() for d in subdirs):
+                msg = f"'{parent_dir.name}' looks like a runs folder — pick the inputs subfolder inside it"
+            else:
+                msg = f"No session subfolders with F_all_array.npy found in '{parent_dir.name}'"
+            start = parent_dir
 
-    # CLI overrides win; otherwise ask once, looping for "add another?".
+    # The parent of the inputs folder is treated as the runs root.
     if runs_dirs is None:
-        if runs_dir is not None:
-            runs_dirs = [runs_dir]
-        else:
-            runs_dirs = _pick_dirs_loop(DEFAULT_RUNS_DIR)
+        runs_dirs = [parent_dir.parent]
 
     user = ""
     while not user.strip():
