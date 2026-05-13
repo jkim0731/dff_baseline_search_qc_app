@@ -1,6 +1,11 @@
-"""Session + run data loading for the binit0 noise-criterion QC app."""
+"""Session + run data loading for the binit0 noise-criterion QC app.
+
+All paths are discovered at runtime from a user-supplied runs_dir; there are
+no hardcoded filesystem paths in this module.
+"""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -8,33 +13,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# ── default paths ─────────────────────────────────────────────────────────────
-INPUTS_755  = Path("/results/runs/0000_first_try")
-INPUTS_804  = Path("/results/runs/804670_inputs")
-RUNS_DIR    = Path("/results/runs")
 TARGET_COEF = 0.674   # half-normal median: E[|X| | X<0] for X~N(0,σ²) = 0.6745σ
 
-# ── combo definitions ─────────────────────────────────────────────────────────
-COMBOS: list[tuple[int, int]] = [(2,3),(2,4),(2,5),(3,3),(3,4),(3,5),(4,5)]
+# ── combo definitions (parameter values only, no paths) ───────────────────────
+COMBOS: list[tuple[int, int]] = [(2,3),(2,4),(2,5),(3,3),(3,4),(3,5),(4,4),(4,5)]
 
-COMBO_KEY   = {c: f"c{''.join(map(str,c))}" for c in COMBOS}   # (2,3)->'c23'
-COMBO_LABEL = {c: f"({c[0]},{c[1]})" for c in COMBOS}          # (2,3)->'(2,3)'
-KEY_COMBO   = {v: k for k, v in COMBO_KEY.items()}              # 'c23'->(2,3)
-COMBO_KEY_LIST = [COMBO_KEY[c] for c in COMBOS]                 # ordered keys
+COMBO_KEY      = {c: f"c{''.join(map(str,c))}" for c in COMBOS}  # (2,3) -> 'c23'
+COMBO_LABEL    = {c: f"({c[0]},{c[1]})" for c in COMBOS}         # (2,3) -> '(2,3)'
+KEY_COMBO      = {v: k for k, v in COMBO_KEY.items()}             # 'c23' -> (2,3)
+COMBO_KEY_LIST = [COMBO_KEY[c] for c in COMBOS]                   # ordered
 
-_COMBO_RUN_NAMES = {
-    (2,3): "0017_cpos2_cneg3_lowess_binit0",
-    (2,4): "0018_cpos2_cneg4_lowess_binit0",
-    (2,5): "0020_cpos2_cneg5_lowess_binit0",
-    (3,3): "0019_cpos3_cneg3_lowess_binit0",
-    (3,4): "0021_cpos3_cneg4_lowess_binit0",
-    (3,5): "0022_cpos3_cneg5_lowess_binit0",
-    (4,5): "0024_cpos4_cneg5_lowess_binit0",
-}
-COMBO_RUN = {c: RUNS_DIR / name for c, name in _COMBO_RUN_NAMES.items()}
-
-TRACE_KEYS = ["short", "long"] + COMBO_KEY_LIST   # 9 total
-COMBO_KEYS = COMBO_KEY_LIST                        # 7 combo-only keys
+TRACE_KEYS = ["short", "long"] + COMBO_KEY_LIST   # 10 total
+COMBO_KEYS = COMBO_KEY_LIST                        # 8 combo-only keys
 
 METRIC_DISPLAY = {
     "F_noise":          "noise",
@@ -43,6 +33,57 @@ METRIC_DISPLAY = {
     "sustained_metric": "sustained",
     "F_skewness":       "skewness",
 }
+
+
+# ── run discovery ─────────────────────────────────────────────────────────────
+
+def discover_combo_runs(runs_dir: Path) -> dict[tuple[int, int], Path]:
+    """Scan runs_dir for folders whose recipe.json matches a binit0 combo.
+
+    A folder qualifies when:
+      - recipe.json exists
+      - x0.b_init_from == "zero"
+      - M.kind == "AsymmetricTukeyBiweight"
+      - (M.c_pos, M.c_neg) is one of the 8 COMBOS
+
+    Returns {(c_pos, c_neg): run_dir} for every found combo.
+    """
+    found: dict[tuple[int, int], Path] = {}
+    for d in sorted(runs_dir.iterdir()):
+        rp = d / "recipe.json"
+        if not d.is_dir() or not rp.exists():
+            continue
+        try:
+            recipe = json.loads(rp.read_text())
+        except Exception:
+            continue
+        x0 = recipe.get("x0", {})
+        M  = recipe.get("M", {})
+        if (x0.get("b_init_from") == "zero"
+                and M.get("kind") == "AsymmetricTukeyBiweight"):
+            combo = (int(M["c_pos"]), int(M["c_neg"]))
+            if combo in COMBOS and combo not in found:
+                found[combo] = d
+    return found
+
+
+def discover_input_dirs(combo_runs: dict[tuple[int, int], Path]) -> list[Path]:
+    """Collect unique inputs_dir values recorded in each run's metadata.json."""
+    dirs: list[Path] = []
+    seen: set[str]   = set()
+    for run_dir in combo_runs.values():
+        mp = run_dir / "metadata.json"
+        if not mp.exists():
+            continue
+        try:
+            md = json.loads(mp.read_text())
+        except Exception:
+            continue
+        p = Path(md.get("inputs_dir", ""))
+        if p.exists() and str(p) not in seen:
+            dirs.append(p)
+            seen.add(str(p))
+    return dirs
 
 
 # ── data container ────────────────────────────────────────────────────────────
@@ -54,10 +95,10 @@ class SessionData:
     timestamps:  np.ndarray    # (T,)
     F:           np.ndarray    # (N, T) mmap
     noise:       np.ndarray    # (N,) per-roi noise_std(F, 'mad')
-    baselines:   dict          # key->(N,T) mmap: 'short','long','c23',...
-    dff_short:   np.ndarray    # (N, T) mmap, precomputed
-    dff_long:    np.ndarray    # (N, T) mmap, precomputed
-    f0_arrays:   dict          # combo_key->(N,T) mmap F0 (for residuals)
+    baselines:   dict          # key -> (N,T) mmap: 'short','long','c23',...
+    dff_short:   np.ndarray    # (N, T) mmap precomputed
+    dff_long:    np.ndarray    # (N, T) mmap precomputed
+    f0_arrays:   dict          # combo_key -> (N,T) mmap F0 (for residuals)
     metrics:     pd.DataFrame  # per-roi, aligned with ROI axis
     rois:        pd.DataFrame  # plane_id, cell_roi_id, ...
 
@@ -65,8 +106,6 @@ class SessionData:
     def n_rois(self) -> int:
         return self.F.shape[0]
 
-
-# ── helpers ───────────────────────────────────────────────────────────────────
 
 def _safe_dff(F: np.ndarray, baseline: np.ndarray) -> np.ndarray:
     F = np.asarray(F, dtype=np.float32)
@@ -78,26 +117,37 @@ def _safe_dff(F: np.ndarray, baseline: np.ndarray) -> np.ndarray:
     return result
 
 
-def _inputs_dir_for(session_key: str) -> Path:
-    return INPUTS_804 if session_key.startswith("804670") else INPUTS_755
-
-
-# ── session discovery ─────────────────────────────────────────────────────────
+# ── session listing ───────────────────────────────────────────────────────────
 
 def list_sessions(
-    inputs_dirs: list[Path] | None = None,
-    runs_dir:    Path | None       = None,
+    runs_dir: Path,
+    combo_runs: dict[tuple[int, int], Path] | None = None,
 ) -> list[tuple[str, Path]]:
-    """[(session_key, inputs_dir)] for sessions with all 7 combo run outputs."""
-    if inputs_dirs is None:
-        inputs_dirs = [d for d in (INPUTS_755, INPUTS_804) if d.exists()]
-    combo_run = {c: (runs_dir or RUNS_DIR) / _COMBO_RUN_NAMES[c] for c in COMBOS}
+    """Return [(session_key, inputs_dir)] for sessions present in all 8 combo runs.
+
+    Raises RuntimeError if any of the 7 required combos is missing from runs_dir.
+    """
+    if combo_runs is None:
+        combo_runs = discover_combo_runs(runs_dir)
+
+    missing = [c for c in COMBOS if c not in combo_runs]
+    if missing:
+        raise RuntimeError(
+            f"Could not find binit0 run folders for combos {missing} in '{runs_dir}'.\n"
+            "Each run folder needs recipe.json with x0.b_init_from='zero' and "
+            "M.kind='AsymmetricTukeyBiweight'."
+        )
+
+    input_dirs = discover_input_dirs(combo_runs)
     sessions: list[tuple[str, Path]] = []
-    for inp_dir in inputs_dirs:
+    for inp_dir in input_dirs:
         for p in sorted(inp_dir.iterdir()):
             if not (p.is_dir() and (p / "F_all_array.npy").exists()):
                 continue
-            if all((combo_run[c] / p.name / "F0_all.npy").exists() for c in COMBOS):
+            if all(
+                (combo_runs[c] / p.name / "F0_all.npy").exists()
+                for c in COMBOS
+            ):
                 sessions.append((p.name, inp_dir))
     return sessions
 
@@ -106,12 +156,12 @@ def list_sessions(
 
 @lru_cache(maxsize=8)
 def load_session(
-    session_key:    str,
+    session_key: str,
     inputs_dir_str: str,
-    runs_dir_str:   str = str(RUNS_DIR),
+    combo_run_strs: tuple[str, ...],   # run_dir strings in COMBOS order (hashable)
 ) -> SessionData:
-    inp = Path(inputs_dir_str) / session_key
-    rd  = Path(runs_dir_str)
+    inp       = Path(inputs_dir_str) / session_key
+    combo_run = {c: Path(s) for c, s in zip(COMBOS, combo_run_strs)}
 
     F     = np.load(inp / "F_all_array.npy",  mmap_mode="r")
     ts    = np.load(inp / "timestamps.npy")
@@ -125,16 +175,15 @@ def load_session(
     dff_long  = np.load(inp / "dff_long_window_all_array.npy",  mmap_mode="r")
 
     f0_arrays: dict = {}
-    combo_run_local = {c: rd / _COMBO_RUN_NAMES[c] for c in COMBOS}
     for combo in COMBOS:
         key      = COMBO_KEY[combo]
-        sess_run = combo_run_local[combo] / session_key
+        sess_run = combo_run[combo] / session_key
         baselines[key] = np.load(sess_run / "F0trend_all.npy", mmap_mode="r")
         f0_arrays[key] = np.load(sess_run / "F0_all.npy",      mmap_mode="r")
 
     rois_csv = inp / "sczdrift_df_all.csv"
     rois = (pd.read_csv(rois_csv) if rois_csv.exists() else
-            pd.DataFrame({"plane_id": ["unknown"] * F.shape[0],
+            pd.DataFrame({"plane_id":    ["unknown"] * F.shape[0],
                           "cell_roi_id": list(range(F.shape[0]))}))
     metrics = pd.DataFrame({
         disp: np.load(inp / f"{key}.npy")
@@ -156,12 +205,9 @@ def load_session(
 # ── noise-criterion computation ───────────────────────────────────────────────
 
 def compute_noise_bar(
-    roi_idx: int, sd: SessionData
+    roi_idx: int, sd: SessionData,
 ) -> tuple[dict, float, str | None]:
-    """Compute |median(neg residuals)| per combo, target, and winner key.
-
-    Returns (med_neg: dict[key->float], target: float, winner_key: str|None).
-    """
+    """Compute |median(neg residuals)| per combo, the target, and winner key."""
     F_roi  = np.asarray(sd.F[roi_idx], dtype=np.float64)
     target = TARGET_COEF * float(sd.noise[roi_idx])
     med_neg: dict = {}
@@ -197,6 +243,5 @@ def aggregate_metrics(sessions: list[tuple[str, Path]]) -> pd.DataFrame:
         df["session_key"] = sess_key
         df["roi_index"]   = np.arange(len(df))
         frames.append(df)
-    if not frames:
-        return pd.DataFrame(columns=list(METRIC_DISPLAY.values()) + ["session_key", "roi_index"])
-    return pd.concat(frames, ignore_index=True)
+    cols = list(METRIC_DISPLAY.values()) + ["session_key", "roi_index"]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=cols)

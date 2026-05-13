@@ -12,21 +12,17 @@ from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFrame, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QRadioButton,
-    QSlider, QSplitter, QVBoxLayout, QWidget,
+    QSizePolicy, QSlider, QSplitter, QVBoxLayout, QWidget,
 )
 
-# resolve sibling packages
-_HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parent / "dff_baseline_search_qc_app"))
-from qc_app.rois import crop_around_mask, get_roi_mask, load_plane_assets
+from base_qc_app.rois import crop_around_mask, get_roi_mask, load_plane_assets
 
 from .curation import DEFAULT_PATH, load_curation, lookup_decision, save_decision
 from .data import (
     COMBO_KEY, COMBO_KEY_LIST, COMBO_KEYS, COMBO_LABEL, COMBOS,
     KEY_COMBO, METRIC_DISPLAY, TARGET_COEF, TRACE_KEYS,
     _safe_dff, aggregate_metrics, compute_noise_bar,
-    list_sessions, load_session,
-    INPUTS_755, INPUTS_804, RUNS_DIR,
+    discover_combo_runs, list_sessions, load_session,
 )
 
 # ── colors ────────────────────────────────────────────────────────────────────
@@ -39,6 +35,7 @@ TRACE_COLORS = {
     "c33":   "#17becf",   # teal
     "c34":   "#bcbd22",   # olive
     "c35":   "#e377c2",   # pink
+    "c44":   "#7f7f7f",   # gray
     "c45":   "#8c564b",   # brown
 }
 TRACE_LABELS = {
@@ -80,10 +77,12 @@ class _ShiftYViewBox(pg.ViewBox):
             super().wheelEvent(ev, axis=0)
 
 
-# ── trace panel (9 traces) ────────────────────────────────────────────────────
+# ── trace panel (10 traces) ───────────────────────────────────────────────────
 
 class TracePanel(QWidget):
-    """F + baselines / dFF plots for the 9 fixed trace keys."""
+    """F + baselines / dFF plots for the 10 fixed trace keys."""
+
+    baseline_mode_changed = pyqtSignal()   # emitted when IRLS ↔ LOWESS toggled
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -95,11 +94,17 @@ class TracePanel(QWidget):
         layout.setSpacing(2)
 
         # ── legend ────────────────────────────────────────────────────────────
-        legend_area = QVBoxLayout(); legend_area.setSpacing(1)
+        legend_area = QVBoxLayout(); legend_area.setSpacing(2)
 
+        # top ctrl row: F label | IRLS/LOWESS toggle | stretch | dFF opacity | Home
         ctrl = QHBoxLayout(); ctrl.setSpacing(4)
         lbl = QLabel("F"); lbl.setStyleSheet("color:#222; font-size:9pt; font-weight:bold;")
-        ctrl.addWidget(lbl); ctrl.addStretch()
+        ctrl.addWidget(lbl)
+        ctrl.addSpacing(6)
+        self._baseline_mode = _BiToggle("IRLS", "LOWESS", active=0)
+        self._baseline_mode.toggled.connect(self.baseline_mode_changed.emit)
+        ctrl.addWidget(self._baseline_mode)
+        ctrl.addStretch()
         ctrl.addWidget(QLabel("dFF opacity:"))
         self._alpha_sl = QSlider(Qt.Horizontal)
         self._alpha_sl.setRange(10, 100); self._alpha_sl.setValue(70)
@@ -112,23 +117,23 @@ class TracePanel(QWidget):
         ctrl.addWidget(self._home_btn)
         legend_area.addLayout(ctrl)
 
-        # 3×3 grid for 9 buttons
+        # Single row of 10 compact buttons (key 0 = last trace c45)
         self._legend_btns: dict[str, QPushButton] = {}
-        grid_w = QWidget()
-        grid   = QGridLayout(grid_w)
-        grid.setContentsMargins(0, 0, 0, 0); grid.setSpacing(3)
+        btn_row = QHBoxLayout(); btn_row.setSpacing(2); btn_row.setContentsMargins(0,0,0,0)
         for i, key in enumerate(TRACE_KEYS):
-            label = TRACE_LABELS[key]
-            btn   = QPushButton(f"{i+1}:{label}")
+            shortcut = "0" if i == len(TRACE_KEYS) - 1 else str(i + 1)
+            label    = TRACE_LABELS[key]
+            btn      = QPushButton(f"{shortcut}:{label}")
             btn.setCheckable(True); btn.setChecked(True)
             btn.setFixedHeight(18)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             self._apply_btn_style(btn, self._colors[key])
             btn.toggled.connect(lambda checked, k=key: self._on_toggle(k, checked))
             btn.setContextMenuPolicy(Qt.CustomContextMenu)
             btn.customContextMenuRequested.connect(lambda pos, k=key: self._pick_color(k))
             self._legend_btns[key] = btn
-            grid.addWidget(btn, i // 3, i % 3)
-        legend_area.addWidget(grid_w)
+            btn_row.addWidget(btn)
+        legend_area.addLayout(btn_row)
         layout.addLayout(legend_area)
 
         # ── plots ─────────────────────────────────────────────────────────────
@@ -153,6 +158,11 @@ class TracePanel(QWidget):
         self._dff_curves: dict = {}
         self._dff_alpha = 178
         self._color_menu_built = False
+
+    @property
+    def baseline_mode(self) -> str:
+        """'irls' (F0trend) or 'lowess' (F0)."""
+        return "lowess" if self._baseline_mode.active() == 1 else "irls"
 
     def _apply_btn_style(self, btn, color_hex):
         r, g, b = _pg_color(color_hex)
@@ -634,13 +644,17 @@ class CurationPanel(QWidget):
 class MainWindow(QMainWindow):
     def __init__(
         self,
-        sessions: list[tuple[str, Path]],
+        sessions:   list[tuple[str, Path]],
+        combo_runs: dict,
         output_path: Path,
         user: str = "",
         agg_df=None,
     ):
         super().__init__()
         self._sessions    = sessions
+        self._combo_runs  = combo_runs
+        # Pre-build the hashable tuple needed by load_session's lru_cache
+        self._combo_run_strs = tuple(str(combo_runs[c]) for c in COMBOS)
         self._output_path = Path(output_path)
         self._user        = user
         self._sess_idx    = 0
@@ -727,6 +741,7 @@ class MainWindow(QMainWindow):
         self.curation.next_roi_btn.clicked.connect(self._next_roi)
         self.curation.save_btn.clicked.connect(self._save)
         self.curation.next_btn.clicked.connect(self._save_and_next)
+        self.trace_panel.baseline_mode_changed.connect(self._refresh_roi)
 
     # ── data loading ──────────────────────────────────────────────────────────
 
@@ -734,7 +749,7 @@ class MainWindow(QMainWindow):
         self._sess_idx = idx
         self._roi_idx  = 0
         sess_key, inp_dir = self._sessions[idx]
-        self._session_data = load_session(sess_key, str(inp_dir))
+        self._session_data = load_session(sess_key, str(inp_dir), self._combo_run_strs)
         self._curation_df  = load_curation(self._output_path)
         self.sess_combo.blockSignals(True)
         self.sess_combo.setCurrentIndex(idx)
@@ -751,18 +766,23 @@ class MainWindow(QMainWindow):
         ts    = sd.timestamps
         F_roi = np.asarray(sd.F[idx])
 
-        # Build per-ROI baselines & dffs (lazy — no full-array materialization)
+        # Build per-ROI baselines & dffs — switch between F0trend (IRLS) and F0 (LOWESS)
+        use_lowess = self.trace_panel.baseline_mode == "lowess"
         baselines: dict = {}
         dffs:      dict = {}
         for key in TRACE_KEYS:
-            b = np.asarray(sd.baselines[key][idx])
-            baselines[key] = b
             if key == "short":
-                dffs[key] = np.asarray(sd.dff_short[idx])
+                baselines[key] = np.asarray(sd.baselines[key][idx])
+                dffs[key]      = np.asarray(sd.dff_short[idx])
             elif key == "long":
-                dffs[key] = np.asarray(sd.dff_long[idx])
+                baselines[key] = np.asarray(sd.baselines[key][idx])
+                dffs[key]      = np.asarray(sd.dff_long[idx])
             else:
-                dffs[key] = _safe_dff(F_roi, b)
+                b = np.asarray(
+                    sd.f0_arrays[key][idx] if use_lowess else sd.baselines[key][idx]
+                )
+                baselines[key] = b
+                dffs[key]      = _safe_dff(F_roi, b)
 
         self.trace_panel.update(ts, F_roi, baselines, dffs)
 
@@ -890,51 +910,94 @@ class MainWindow(QMainWindow):
         if key in nav:
             nav[key]()
             return
-        # keys 1-9 toggle traces
+        # keys 1-9 toggle traces 1-9; key 0 toggles the last trace (c45)
         qt_num = [Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4, Qt.Key_5,
                   Qt.Key_6, Qt.Key_7, Qt.Key_8, Qt.Key_9]
         for i, qt_k in enumerate(qt_num):
             if key == qt_k and i < len(TRACE_KEYS):
                 self.trace_panel.toggle_trace(TRACE_KEYS[i])
                 return
+        if key == Qt.Key_0:
+            self.trace_panel.toggle_trace(TRACE_KEYS[-1])
+            return
         super().keyPressEvent(event)
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
 
-def run(
-    inputs_dirs: list[Path] | None = None,
-    runs_dir:    Path | None       = None,
-    output:      Path | None       = None,
-):
+def run(runs_dir: Path | None = None, output: Path | None = None):
     pg.setConfigOptions(background="w", foreground="k", antialias=False, useOpenGL=True)
     app = QApplication.instance() or QApplication(sys.argv)
 
-    sessions = list_sessions(inputs_dirs, runs_dir)
-    if not sessions:
+    # ── pick runs_dir if not supplied ─────────────────────────────────────────
+    msg = None
+    while runs_dir is None:
+        title = ("Select runs directory (contains numbered run sub-folders)"
+                 if msg is None else f"⚠ {msg} — pick again, or Cancel to quit")
+        chosen = QFileDialog.getExistingDirectory(None, title, str(Path.home()))
+        if not chosen:
+            sys.exit(0)
+        runs_dir = Path(chosen)
+        try:
+            combo_runs = discover_combo_runs(runs_dir)
+        except Exception as e:
+            msg = str(e); runs_dir = None; continue
+        missing = [c for c in COMBOS if c not in combo_runs]
+        if missing:
+            msg = (f"Missing binit0 runs for {missing}. "
+                   "Make sure all 8 (c_pos,c_neg) combos are present.")
+            runs_dir = None
+        else:
+            break
+    else:
+        combo_runs = discover_combo_runs(runs_dir)
+
+    # ── load sessions ─────────────────────────────────────────────────────────
+    try:
+        sessions = list_sessions(runs_dir, combo_runs)
+    except RuntimeError as e:
         from PyQt5.QtWidgets import QMessageBox
-        QMessageBox.critical(None, "No sessions",
-            "No sessions found with all 7 combo run outputs.\n"
-            "Check that /results/runs/ contains the expected binit0 run folders.")
+        QMessageBox.critical(None, "Setup error", str(e))
         sys.exit(1)
 
+    if not sessions:
+        from PyQt5.QtWidgets import QMessageBox
+        QMessageBox.critical(
+            None, "No sessions",
+            f"No complete sessions found under the input directories.\n"
+            f"Runs dir: {runs_dir}\n"
+            "Check that metadata.json in each run folder points to a valid inputs_dir.",
+        )
+        sys.exit(1)
+
+    # ── login ─────────────────────────────────────────────────────────────────
     user = ""
     while not user.strip():
         name, ok = QInputDialog.getText(None, "Login", "Enter your name:")
-        if not ok: sys.exit(0)
+        if not ok:
+            sys.exit(0)
         user = name.strip()
 
+    # ── output path ───────────────────────────────────────────────────────────
     if output is None:
+        default = runs_dir / "binit0_qc_curation.csv"
         try:
-            probe = Path("/results/binit0_qc_curation.csv")
-            probe.parent.mkdir(parents=True, exist_ok=True)
-            output = probe
+            default.parent.mkdir(parents=True, exist_ok=True)
+            probe = default.parent / ".write_probe"
+            probe.touch(); probe.unlink()
+            output = default
         except (PermissionError, OSError):
-            output = Path.home() / "binit0_qc_curation.csv"
+            output = Path("/root/capsule/scratch/binit0_qc_curation.csv")
 
-    print(f"Loading aggregate metrics for {len(sessions)} sessions…")
+    print(f"Runs dir  : {runs_dir}")
+    print(f"Sessions  : {len(sessions)}")
+    print(f"Output    : {output}")
+    print("Loading aggregate metrics…")
     agg_df = aggregate_metrics(sessions)
 
-    win = MainWindow(sessions=sessions, output_path=output, user=user, agg_df=agg_df)
+    win = MainWindow(
+        sessions=sessions, combo_runs=combo_runs,
+        output_path=output, user=user, agg_df=agg_df,
+    )
     win.show()
     sys.exit(app.exec_())

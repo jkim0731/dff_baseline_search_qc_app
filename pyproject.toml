@@ -19,9 +19,10 @@ dependencies = [
 ]
 
 [project.scripts]
-dff-qc  = "qc_app.app:run"
-dff-fit = "baseline_search.run:main"
+dff-qc      = "base_qc_app.app:run"
+dff-fit     = "baseline_search.run:main"
+binit0-qc   = "binit0_qc_app.main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["qc_app*", "baseline_search*"]
+include = ["base_qc_app*", "baseline_search*", "binit0_qc_app*"]
