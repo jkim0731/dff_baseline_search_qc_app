@@ -22,6 +22,7 @@ METRIC_DISPLAY = {
 }
 
 
+
 @dataclass
 class SessionData:
     session_key: str
@@ -41,35 +42,73 @@ class SessionData:
 def _safe_dff(F: np.ndarray, baseline: np.ndarray) -> np.ndarray:
     F = np.asarray(F, dtype=np.float32)
     b = np.asarray(baseline, dtype=np.float32)
-    safe = np.abs(b) > 1e-6
-    return np.where(safe, (F - b) / np.where(safe, b, 1.0), 0.0).astype(np.float32)
+    nan_mask = np.isnan(b)
+    safe = (~nan_mask) & (np.abs(b) > 1e-6)
+    result = np.where(safe, (F - b) / np.where(safe, b, 1.0), 0.0).astype(np.float32)
+    result[nan_mask] = np.nan
+    return result
 
 
 def list_sessions(parent_dir: Path = DEFAULT_PARENT_DIR) -> list[Path]:
-    return sorted(p for p in Path(parent_dir).iterdir() if p.is_dir())
+    """Return subdirs that look like input session folders (contain F_all_array.npy)."""
+    return sorted(
+        p for p in Path(parent_dir).iterdir()
+        if p.is_dir() and (p / "F_all_array.npy").exists()
+    )
+
+
+_BASELINE_FILES = {
+    "short":   "baseline_short_window_all_array.npy",
+    "long":    "baseline_long_window_all_array.npy",
+    "F0trend": "F0trend_all.npy",
+    "F0":      "F0_all.npy",
+}
+_PRECOMP_DFF_FILES = {
+    "short": "dff_short_window_all_array.npy",
+    "long":  "dff_long_window_all_array.npy",
+}
 
 
 @lru_cache(maxsize=8)
 def load_session(session_path_str: str) -> SessionData:
     p = Path(session_path_str)
-    rois = pd.read_csv(p / "sczdrift_df_all.csv")
+    if not (p / "F_all_array.npy").exists():
+        raise FileNotFoundError(
+            f"{p} does not look like a session inputs folder "
+            f"(F_all_array.npy not found). "
+            f"Did you select a runs folder instead of the inputs folder?"
+        )
     F = np.load(p / "F_all_array.npy", mmap_mode="r")
-    timestamps = np.load(p / "timestamps.npy")
-    baselines = {
-        "short":   np.load(p / "baseline_short_window_all_array.npy", mmap_mode="r"),
-        "long":    np.load(p / "baseline_long_window_all_array.npy",  mmap_mode="r"),
-        "F0trend": np.load(p / "F0trend_all.npy", mmap_mode="r"),
-        "F0":      np.load(p / "F0_all.npy",      mmap_mode="r"),
-    }
-    dffs = {
-        "short":   np.load(p / "dff_short_window_all_array.npy", mmap_mode="r"),
-        "long":    np.load(p / "dff_long_window_all_array.npy",  mmap_mode="r"),
-        "F0trend": _safe_dff(np.asarray(F), np.asarray(baselines["F0trend"])),
-        "F0":      _safe_dff(np.asarray(F), np.asarray(baselines["F0"])),
-    }
+    roi_csv = p / "sczdrift_df_all.csv"
+    if roi_csv.exists():
+        rois = pd.read_csv(roi_csv)
+    else:
+        rois = pd.DataFrame({
+            "plane_id":    ["unknown"] * F.shape[0],
+            "cell_roi_id": list(range(F.shape[0])),
+        })
+    ts_path = p / "timestamps.npy"
+    timestamps = np.load(ts_path) if ts_path.exists() else np.arange(F.shape[1], dtype=np.float32)
+
+    baselines: dict = {}
+    dffs: dict = {}
+    for key, bfile in _BASELINE_FILES.items():
+        bpath = p / bfile
+        if not bpath.exists():
+            continue
+        b = np.load(bpath, mmap_mode="r")
+        baselines[key] = b
+        dfile = _PRECOMP_DFF_FILES.get(key)
+        dpath = p / dfile if dfile else None
+        if dpath and dpath.exists():
+            dffs[key] = np.load(dpath, mmap_mode="r")
+        else:
+            dffs[key] = _safe_dff(np.asarray(F), np.asarray(b))
+
     metrics = pd.DataFrame({
         display: np.load(p / f"{key}.npy")
         for key, display in METRIC_DISPLAY.items()
+        if (p / f"{key}.npy").exists()
     })
     return SessionData(session_key=p.name, path=p, timestamps=timestamps,
                        F=F, baselines=baselines, dffs=dffs, metrics=metrics, rois=rois)

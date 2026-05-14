@@ -13,10 +13,19 @@ import pandas as pd
 
 @dataclass
 class PlaneAssets:
-    plane_id: str
-    max_img:   np.ndarray    # (H, W) float32
-    mean_img:  np.ndarray    # (H, W) float32
+    plane_id:  str
+    max_img:   np.ndarray    # (H, W) float32  raw
+    mean_img:  np.ndarray    # (H, W) float32  raw
+    max_norm:  np.ndarray    # (H, W) float32  normalized [0,1]
+    mean_norm: np.ndarray    # (H, W) float32  normalized [0,1]
     roi_table: pd.DataFrame  # columns: cell_roi_id, mask_matrix, ...
+
+
+def _normalize(img: np.ndarray, lo_pct: float = 1.0, hi_pct: float = 99.5) -> np.ndarray:
+    lo, hi = np.percentile(img, [lo_pct, hi_pct])
+    if hi <= lo:
+        hi = lo + 1.0
+    return np.clip((img.astype(np.float32) - lo) / (hi - lo), 0.0, 1.0)
 
 
 @lru_cache(maxsize=64)
@@ -26,14 +35,18 @@ def load_plane_assets(session_path_str: str, plane_id: str) -> PlaneAssets:
     mean_img = np.load(p / f"{plane_id}_mean_img.npy").astype(np.float32)
     with open(p / f"{plane_id}_roi_table.pkl", "rb") as fh:
         roi_table = pickle.load(fh)
-    return PlaneAssets(plane_id=plane_id, max_img=max_img,
-                       mean_img=mean_img, roi_table=roi_table)
+    return PlaneAssets(plane_id=plane_id,
+                       max_img=max_img,   mean_img=mean_img,
+                       max_norm=_normalize(max_img), mean_norm=_normalize(mean_img),
+                       roi_table=roi_table)
 
 
-def get_roi_mask(plane: PlaneAssets, cell_roi_id: int) -> np.ndarray:
+@lru_cache(maxsize=4096)
+def get_roi_mask(session_path_str: str, plane_id: str, cell_roi_id: int) -> np.ndarray:
+    plane = load_plane_assets(session_path_str, plane_id)
     rows = plane.roi_table[plane.roi_table["cell_roi_id"] == cell_roi_id]
     if rows.empty:
-        raise IndexError(f"cell_roi_id {cell_roi_id} not in plane {plane.plane_id}")
+        raise IndexError(f"cell_roi_id {cell_roi_id} not in plane {plane_id}")
     return rows.iloc[0]["mask_matrix"].astype(bool)
 
 
@@ -52,7 +65,4 @@ def crop_around_mask(fov: np.ndarray, mask: np.ndarray,
 def normalize_for_display(img: np.ndarray,
                            lo_pct: float = 1.0,
                            hi_pct: float = 99.5) -> np.ndarray:
-    lo, hi = np.percentile(img, [lo_pct, hi_pct])
-    if hi <= lo:
-        hi = lo + 1.0
-    return np.clip((img.astype(np.float32) - lo) / (hi - lo), 0.0, 1.0)
+    return _normalize(img, lo_pct, hi_pct)
