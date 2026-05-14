@@ -67,22 +67,22 @@ def discover_combo_runs(runs_dir: Path) -> dict[tuple[int, int], Path]:
     return found
 
 
-def discover_input_dirs(combo_runs: dict[tuple[int, int], Path]) -> list[Path]:
-    """Collect unique inputs_dir values recorded in each run's metadata.json."""
+def discover_input_dirs(runs_dir: Path, combo_runs: dict[tuple[int, int], Path]) -> list[Path]:
+    """Find input directories inside runs_dir by content, not by stored paths.
+
+    An input directory is any subdir of runs_dir that:
+    - is NOT a combo run folder (no recipe.json at its root)
+    - contains at least one session subdir with F_all_array.npy
+    """
+    combo_run_paths = {str(p) for p in combo_runs.values()}
     dirs: list[Path] = []
-    seen: set[str]   = set()
-    for run_dir in combo_runs.values():
-        mp = run_dir / "metadata.json"
-        if not mp.exists():
+    for d in sorted(runs_dir.iterdir()):
+        if not d.is_dir() or str(d) in combo_run_paths:
             continue
-        try:
-            md = json.loads(mp.read_text())
-        except Exception:
+        if (d / "recipe.json").exists():
             continue
-        p = Path(md.get("inputs_dir", ""))
-        if p.exists() and str(p) not in seen:
-            dirs.append(p)
-            seen.add(str(p))
+        if any((s / "F_all_array.npy").exists() for s in d.iterdir() if s.is_dir()):
+            dirs.append(d)
     return dirs
 
 
@@ -138,7 +138,7 @@ def list_sessions(
             "M.kind='AsymmetricTukeyBiweight'."
         )
 
-    input_dirs = discover_input_dirs(combo_runs)
+    input_dirs = discover_input_dirs(runs_dir, combo_runs)
     sessions: list[tuple[str, Path]] = []
     for inp_dir in input_dirs:
         for p in sorted(inp_dir.iterdir()):
@@ -205,14 +205,19 @@ def load_session(
 # ── noise-criterion computation ───────────────────────────────────────────────
 
 def compute_noise_bar(
-    roi_idx: int, sd: SessionData,
+    roi_idx: int, sd: SessionData, use_f0trend: bool = False,
 ) -> tuple[dict, float, str | None]:
-    """Compute |median(neg residuals)| per combo, the target, and winner key."""
+    """Compute |median(neg residuals)| per combo, the target, and winner key.
+
+    use_f0trend=True  → residuals from F0trend (IRLS trend only)
+    use_f0trend=False → residuals from F0     (full LOWESS baseline)
+    """
     F_roi  = np.asarray(sd.F[roi_idx], dtype=np.float64)
     target = TARGET_COEF * float(sd.noise[roi_idx])
     med_neg: dict = {}
     for key in COMBO_KEYS:
-        f0    = np.asarray(sd.f0_arrays[key][roi_idx], dtype=np.float64)
+        src   = sd.baselines[key] if use_f0trend else sd.f0_arrays[key]
+        f0    = np.asarray(src[roi_idx], dtype=np.float64)
         valid = ~np.isnan(f0)
         res   = F_roi - f0
         neg   = res[valid & (res < 0)]

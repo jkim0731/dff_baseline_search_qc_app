@@ -19,8 +19,11 @@ def main():
     p.add_argument("--output", type=Path, default=None,
                    help="Curation CSV output path "
                         "(default: <runs_dir>/binit0_qc_curation.csv)")
+    p.add_argument("--roi_list", type=Path, default=None,
+                   help="CSV with columns session_key,roi_index to restrict navigation. "
+                        "Space/Save+Next walks this list; J/K still work per-session.")
     args = p.parse_args()
-    run(runs_dir=args.runs_dir, output=args.output)
+    run(runs_dir=args.runs_dir, output=args.output, roi_list=args.roi_list)
 
 
 if __name__ == "__main__":

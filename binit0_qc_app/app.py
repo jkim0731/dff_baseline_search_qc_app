@@ -96,12 +96,9 @@ class TracePanel(QWidget):
         # ── legend ────────────────────────────────────────────────────────────
         legend_area = QVBoxLayout(); legend_area.setSpacing(2)
 
-        # top ctrl row: F label | IRLS/LOWESS toggle | stretch | dFF opacity | Home
+        # top ctrl row: IRLS/LOWESS toggle | stretch | dFF opacity | Home
         ctrl = QHBoxLayout(); ctrl.setSpacing(4)
-        lbl = QLabel("F"); lbl.setStyleSheet("color:#222; font-size:9pt; font-weight:bold;")
-        ctrl.addWidget(lbl)
-        ctrl.addSpacing(6)
-        self._baseline_mode = _BiToggle("IRLS", "LOWESS", active=0)
+        self._baseline_mode = _BiToggle("IRLS", "LOWESS (L)", active=0)
         self._baseline_mode.toggled.connect(self.baseline_mode_changed.emit)
         ctrl.addWidget(self._baseline_mode)
         ctrl.addStretch()
@@ -111,7 +108,7 @@ class TracePanel(QWidget):
         self._alpha_sl.setFixedWidth(70); self._alpha_sl.setFixedHeight(16)
         self._alpha_sl.valueChanged.connect(self._on_alpha_changed)
         ctrl.addWidget(self._alpha_sl)
-        self._home_btn = QPushButton("Home")
+        self._home_btn = QPushButton("Home (H)")
         self._home_btn.setFixedHeight(18)
         self._home_btn.clicked.connect(self._home)
         ctrl.addWidget(self._home_btn)
@@ -191,8 +188,8 @@ class TracePanel(QWidget):
         if key in self._f_curves:
             self._f_curves[key].setPen(_make_pen(_pg_color(hex_c), width=2))
         if key in self._dff_curves:
-            r, g, b = _pg_color(hex_c)
-            self._dff_curves[key].setPen(_make_pen((r, g, b, self._dff_alpha), width=2))
+            # opacity is controlled via setOpacity; keep pen fully opaque
+            self._dff_curves[key].setPen(_make_pen(_pg_color(hex_c), width=2))
 
     def _build_plot_color_menu(self):
         for pw in (self.f_plot, self.dff_plot):
@@ -219,10 +216,11 @@ class TracePanel(QWidget):
         self.dff_plot.addItem(pg.InfiniteLine(
             pos=0, angle=0,
             pen=pg.mkPen(color=(180,180,180), width=1, style=Qt.DashLine)))
+        init_opacity = self._alpha_sl.value() / 100.0
         for key in TRACE_KEYS:
-            r, g, b = _pg_color(self._colors[key])
             self._dff_curves[key] = self.dff_plot.plot(
-                pen=_make_pen((r, g, b, self._dff_alpha), width=2))
+                pen=_make_pen(_pg_color(self._colors[key]), width=2))
+            self._dff_curves[key].setOpacity(init_opacity)
         if not self._color_menu_built:
             self._build_plot_color_menu()
             self._color_menu_built = True
@@ -238,10 +236,9 @@ class TracePanel(QWidget):
                 curves[key].setVisible(checked)
 
     def _on_alpha_changed(self, value):
-        self._dff_alpha = int(value / 100 * 255)
-        for key, curve in self._dff_curves.items():
-            r, g, b = _pg_color(self._colors[key])
-            curve.setPen(_make_pen((r, g, b, self._dff_alpha), width=2))
+        opacity = value / 100.0
+        for curve in self._dff_curves.values():
+            curve.setOpacity(opacity)
 
     def _home(self):
         self.f_plot.enableAutoRange()
@@ -300,7 +297,7 @@ class NoiseCriterionPlot(QWidget):
         self._glw.setFixedHeight(195)
         self._pi  = self._glw.addPlot()
         self._pi.setTitle(
-            "|median(neg. residuals)| per combo  vs  0.674·σ<sub>noise</sub>  (target)",
+            "|median(neg. residuals of F−F0trend)| per combo  vs  0.674·σ<sub>noise</sub>  (target)",
             size="8pt",
         )
         self._pi.setLabel("left", "a.u.")
@@ -323,16 +320,16 @@ class NoiseCriterionPlot(QWidget):
 
         # Ratio reference line at 1.0 (relative axis, not used — absolute axis is cleaner)
 
-        self._bars: pg.BarGraphItem | None = None
+        self._bars: list = []          # one BarGraphItem per combo
         self._text_items: list[pg.TextItem] = []
 
         layout.addWidget(self._glw)
 
     def update(self, med_neg: dict, target: float, winner_key: str | None):
         # Remove stale items
-        if self._bars is not None:
-            self._pi.removeItem(self._bars)
-            self._bars = None
+        for b in self._bars:
+            self._pi.removeItem(b)
+        self._bars = []
         for t in self._text_items:
             self._pi.removeItem(t)
         self._text_items = []
@@ -341,44 +338,42 @@ class NoiseCriterionPlot(QWidget):
         self._target_line.setValue(target)
         self._target_label.setPos(len(COMBO_KEYS) - 0.5, target)
 
-        x_pos   = list(range(len(COMBO_KEYS)))
-        heights = []
-        brushes = []
-        pens    = []
-
-        for key in COMBO_KEYS:
+        finite_heights = []
+        for i, key in enumerate(COMBO_KEYS):
             val = med_neg.get(key, float("nan"))
-            h   = float(val) if np.isfinite(val) else 0.0
-            heights.append(h)
+            if not np.isfinite(val):
+                continue
+            h = float(val)
+            finite_heights.append(h)
 
             r, g, b = _pg_color(TRACE_COLORS[key])
             if key == winner_key:
-                brushes.append(pg.mkBrush(r, g, b, 230))
-                pens.append(pg.mkPen(color=(220, 170, 0), width=3))
+                brush = pg.mkBrush(r, g, b, 230)
+                pen   = pg.mkPen(color=(220, 170, 0), width=3)
             else:
-                brushes.append(pg.mkBrush(r, g, b, 110))
-                pens.append(pg.mkPen(color=(140, 140, 140), width=1))
+                brush = pg.mkBrush(r, g, b, 110)
+                pen   = pg.mkPen(color=(140, 140, 140), width=1)
 
-        self._bars = pg.BarGraphItem(
-            x=x_pos, height=heights, width=0.6,
-            brushes=brushes, pens=pens,
-        )
-        self._pi.addItem(self._bars)
+            # One BarGraphItem per bar avoids all list-brush rendering bugs
+            bar = pg.BarGraphItem(x=[i], height=[h], width=0.6, brush=brush, pen=pen)
+            self._pi.addItem(bar)
+            self._bars.append(bar)
 
-        # Ratio text above each bar
-        y_max = max([h for h in heights if h > 0] + [target], default=1.0)
-        for i, (key, h) in enumerate(zip(COMBO_KEYS, heights)):
-            if h <= 0 or target <= 0:
+        # Ratio text — i is always the real combo position, not a filtered index
+        y_max = max(finite_heights + [target], default=1.0)
+        for i, key in enumerate(COMBO_KEYS):
+            val = med_neg.get(key, float("nan"))
+            if not np.isfinite(val) or target <= 0:
                 continue
+            h     = float(val)
             ratio = h / target
             star  = "★" if key == winner_key else ""
-            bold  = key == winner_key
             ti    = pg.TextItem(
                 text=f"{star}{ratio:.2f}",
                 anchor=(0.5, 1.0),
                 color=(180, 130, 0) if key == winner_key else (80, 80, 80),
             )
-            if bold:
+            if key == winner_key:
                 ti.setFont(pg.QtGui.QFont("Arial", 8, pg.QtGui.QFont.Bold))
             ti.setPos(i, h + y_max * 0.03)
             self._pi.addItem(ti)
@@ -386,6 +381,69 @@ class NoiseCriterionPlot(QWidget):
 
         self._pi.setYRange(0, y_max * 1.20, padding=0)
         self._pi.setXRange(-0.6, len(COMBO_KEYS) - 0.4, padding=0)
+
+
+# ── jump-to-index label ───────────────────────────────────────────────────────
+
+class _JumpEdit(QLineEdit):
+    """Displays as a plain label; click to type a 1-based index, Enter to jump."""
+    jumped = pyqtSignal(int)   # emits 0-based index
+
+    _LABEL_STYLE = "QLineEdit { background: transparent; border: none; padding: 0px; }"
+    _EDIT_STYLE  = ("QLineEdit { background: white; border: 1px solid #888; "
+                    "border-radius: 2px; padding: 0px 3px; }")
+
+    def __init__(self, color: str = "", parent=None):
+        super().__init__(parent)
+        self._display = ""
+        self._color   = color
+        self.setFrame(False)
+        self.setReadOnly(True)
+        self._apply_label_style()
+        self.returnPressed.connect(self._on_return)
+
+    def _apply_label_style(self):
+        color_rule = f"color: {self._color}; " if self._color else ""
+        self.setStyleSheet(
+            f"QLineEdit {{ background: transparent; border: none; padding: 0px; {color_rule}}}"
+        )
+
+    def set_display(self, text: str):
+        self._display = text
+        if self.isReadOnly():
+            self.setText(text)
+
+    def mousePressEvent(self, ev):
+        if self.isReadOnly():
+            self.setReadOnly(False)
+            self.setStyleSheet(self._EDIT_STYLE)
+            self.setText("")
+            self.setPlaceholderText(self._display)
+        super().mousePressEvent(ev)
+
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key_Escape:
+            self._revert()
+        else:
+            super().keyPressEvent(ev)
+
+    def focusOutEvent(self, ev):
+        self._revert()
+        super().focusOutEvent(ev)
+
+    def _revert(self):
+        self.setReadOnly(True)
+        self._apply_label_style()
+        self.setText(self._display)
+
+    def _on_return(self):
+        try:
+            idx = int(self.text().strip()) - 1   # 1-based input → 0-based
+            if idx >= 0:
+                self.jumped.emit(idx)
+        except ValueError:
+            pass
+        self._revert()
 
 
 # ── image panel (copied from original) ───────────────────────────────────────
@@ -649,6 +707,7 @@ class MainWindow(QMainWindow):
         output_path: Path,
         user: str = "",
         agg_df=None,
+        roi_list: list | None = None,
     ):
         super().__init__()
         self._sessions    = sessions
@@ -662,6 +721,8 @@ class MainWindow(QMainWindow):
         self._session_data  = None
         self._curation_df   = load_curation(self._output_path)
         self._current_winner: str | None = None
+        self._roi_list = roi_list   # list of (session_key, roi_index) or None
+        self._list_pos = 0
 
         self.setWindowTitle(
             f"binit0 Noise QC — {user}" if user else "binit0 Noise QC"
@@ -675,7 +736,10 @@ class MainWindow(QMainWindow):
             self.metric_hists.load_all(agg_df)
 
         if self._sessions:
-            self._load_session(0)
+            if self._roi_list:
+                self._goto_list_entry(0)
+            else:
+                self._load_session(0)
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
@@ -691,11 +755,20 @@ class MainWindow(QMainWindow):
         for sk, _ in self._sessions:
             self.sess_combo.addItem(sk)
         top.addWidget(self.sess_combo); top.addSpacing(12)
-        self.roi_label   = QLabel("ROI: — / —")
-        self.plane_label = QLabel("")
-        self.roiid_label = QLabel("")
+        self.roi_label   = _JumpEdit()
+        self.roi_label.set_display("ROI: — / —")
+        self.roi_label.setMinimumWidth(90)
+        self.plane_label  = QLabel("")
+        self.roiid_label  = QLabel("")
         self.status_label = QLabel("")
-        for lbl in (self.roi_label, self.plane_label, self.roiid_label, self.status_label):
+        self.list_label   = _JumpEdit(color="#0055cc")
+        self.list_label.setStyleSheet(
+            "QLineEdit { background: transparent; border: none; padding: 0px; "
+            "color: #0055cc; font-weight: bold; }"
+        )
+        self.list_label.setMinimumWidth(80)
+        for lbl in (self.roi_label, self.plane_label, self.roiid_label,
+                    self.status_label, self.list_label):
             top.addWidget(lbl); top.addSpacing(8)
         top.addStretch()
         self.capture_btn = QPushButton("Capture (C)")
@@ -742,6 +815,8 @@ class MainWindow(QMainWindow):
         self.curation.save_btn.clicked.connect(self._save)
         self.curation.next_btn.clicked.connect(self._save_and_next)
         self.trace_panel.baseline_mode_changed.connect(self._refresh_roi)
+        self.roi_label.jumped.connect(self._jump_to_roi)
+        self.list_label.jumped.connect(self._goto_list_entry)
 
     # ── data loading ──────────────────────────────────────────────────────────
 
@@ -761,7 +836,12 @@ class MainWindow(QMainWindow):
         if sd is None: return
         idx = self._roi_idx
         n   = sd.n_rois
-        self.roi_label.setText(f"ROI: {idx+1} / {n}")
+        # In list mode the ROI label is hidden; session/plane/cell info still shown below
+        if self._roi_list:
+            self.roi_label.setVisible(False)
+        else:
+            self.roi_label.setVisible(True)
+            self.roi_label.set_display(f"ROI: {idx+1}/{n}")
 
         ts    = sd.timestamps
         F_roi = np.asarray(sd.F[idx])
@@ -786,8 +866,8 @@ class MainWindow(QMainWindow):
 
         self.trace_panel.update(ts, F_roi, baselines, dffs)
 
-        # Noise bar
-        med_neg, target, winner_key = compute_noise_bar(idx, sd)
+        # Noise bar always evaluates F0trend (IRLS) residuals — display mode only affects traces
+        med_neg, target, winner_key = compute_noise_bar(idx, sd, use_f0trend=True)
         self._current_winner = winner_key
         self.noise_plot.update(med_neg, target, winner_key)
         self.trace_panel.highlight_winner(winner_key)
@@ -825,16 +905,49 @@ class MainWindow(QMainWindow):
     # ── navigation ────────────────────────────────────────────────────────────
 
     def _prev_roi(self):
-        if self._session_data and self._roi_idx > 0:
+        if self._roi_list:
+            self._goto_list_entry(self._list_pos - 1)
+        elif self._session_data and self._roi_idx > 0:
             self._roi_idx -= 1
             self._refresh_roi()
 
     def _next_roi(self):
-        if self._session_data and self._roi_idx < self._session_data.n_rois - 1:
+        if self._roi_list:
+            self._goto_list_entry(self._list_pos + 1)
+        elif self._session_data and self._roi_idx < self._session_data.n_rois - 1:
             self._roi_idx += 1
             self._refresh_roi()
 
     def _on_session_changed(self, idx): self._load_session(idx)
+
+    def _jump_to_roi(self, idx: int):
+        """Jump to a session ROI by 0-based index. Only active in session mode (no list)."""
+        if self._roi_list or self._session_data is None:
+            return
+        self._roi_idx = max(0, min(idx, self._session_data.n_rois - 1))
+        self._refresh_roi()
+
+    def _goto_list_entry(self, pos: int):
+        if not self._roi_list:
+            return
+        pos = max(0, min(pos, len(self._roi_list) - 1))
+        self._list_pos = pos
+        sess_key, roi_idx = self._roi_list[pos]
+        for i, (sk, _) in enumerate(self._sessions):
+            if sk == sess_key:
+                if i != self._sess_idx:
+                    self._load_session(i)   # resets _roi_idx=0, calls _refresh_roi
+                self._roi_idx = roi_idx
+                self._refresh_roi()
+                self._update_list_label()
+                return
+        self.status_label.setText(f"[list: session {sess_key!r} not in runs dir]")
+
+    def _update_list_label(self):
+        if self._roi_list:
+            self.list_label.set_display(f"List: {self._list_pos + 1}/{len(self._roi_list)}")
+        else:
+            self.list_label.set_display("")
 
     # ── curation ─────────────────────────────────────────────────────────────
 
@@ -861,7 +974,10 @@ class MainWindow(QMainWindow):
 
     def _save_and_next(self):
         self._save()
-        self._next_roi()
+        if self._roi_list:
+            self._goto_list_entry(self._list_pos + 1)
+        else:
+            self._next_roi()
 
     # ── capture ───────────────────────────────────────────────────────────────
 
@@ -895,7 +1011,11 @@ class MainWindow(QMainWindow):
             tag = f"_{sd.session_key}_{row['plane_id']}_cell{int(row['cell_roi_id'])}"
         ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         path = out / f"capture{tag}_{ts}.png"
-        self.grab().save(str(path))
+        # grabWindow captures from the screen compositor, so OpenGL widgets
+        # render correctly without disrupting the GL framebuffer state.
+        screen = QApplication.primaryScreen()
+        pix = screen.grabWindow(int(self.winId()))
+        pix.save(str(path))
         self.status_label.setText(f"Saved: {path}")
 
     # ── keyboard shortcuts ────────────────────────────────────────────────────
@@ -906,7 +1026,9 @@ class MainWindow(QMainWindow):
                Qt.Key_S: self._save,     Qt.Key_Space: self._save_and_next,
                Qt.Key_C: self._capture,  Qt.Key_M: self.image_panel.mask_chk.toggle,
                Qt.Key_Z: self.image_panel.toggle_zoom,
-               Qt.Key_A: self.image_panel.toggle_img_mode}
+               Qt.Key_A: self.image_panel.toggle_img_mode,
+               Qt.Key_L: self.trace_panel._baseline_mode.toggle,
+               Qt.Key_H: self.trace_panel._home}
         if key in nav:
             nav[key]()
             return
@@ -925,7 +1047,7 @@ class MainWindow(QMainWindow):
 
 # ── entry point ───────────────────────────────────────────────────────────────
 
-def run(runs_dir: Path | None = None, output: Path | None = None):
+def run(runs_dir: Path | None = None, output: Path | None = None, roi_list: Path | None = None):
     pg.setConfigOptions(background="w", foreground="k", antialias=False, useOpenGL=True)
     app = QApplication.instance() or QApplication(sys.argv)
 
@@ -995,9 +1117,20 @@ def run(runs_dir: Path | None = None, output: Path | None = None):
     print("Loading aggregate metrics…")
     agg_df = aggregate_metrics(sessions)
 
+    roi_list_entries = None
+    if roi_list is not None:
+        import pandas as pd
+        rl_df = pd.read_csv(roi_list)
+        roi_list_entries = list(zip(
+            rl_df["session_key"].astype(str),
+            rl_df["roi_index"].astype(int),
+        ))
+        print(f"ROI list  : {len(roi_list_entries)} entries from {roi_list}")
+
     win = MainWindow(
         sessions=sessions, combo_runs=combo_runs,
         output_path=output, user=user, agg_df=agg_df,
+        roi_list=roi_list_entries,
     )
     win.show()
     sys.exit(app.exec_())
