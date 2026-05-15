@@ -37,33 +37,58 @@ METRIC_DISPLAY = {
 
 # ── run discovery ─────────────────────────────────────────────────────────────
 
-def discover_combo_runs(runs_dir: Path) -> dict[tuple[int, int], Path]:
-    """Scan runs_dir for folders whose recipe.json matches a binit0 combo.
+import re as _re
+_COMBO_NAME_RE = _re.compile(r"_c(\d)(\d)\b")
 
-    A folder qualifies when:
-      - recipe.json exists
-      - x0.b_init_from == "zero"
-      - M.kind == "AsymmetricTukeyBiweight"
-      - (M.c_pos, M.c_neg) is one of the 8 COMBOS
+
+def _infer_combo_from_name(name: str) -> tuple[int, int] | None:
+    """Parse (c_pos, c_neg) from a folder name like '0001_binit0_c23'."""
+    m = _COMBO_NAME_RE.search(name)
+    if m:
+        return (int(m.group(1)), int(m.group(2)))
+    return None
+
+
+def _looks_like_combo_run(d: Path) -> bool:
+    """True if d contains at least one session subdir with F0_all.npy."""
+    return any(
+        (s / "F0_all.npy").exists()
+        for s in d.iterdir() if s.is_dir()
+    )
+
+
+def discover_combo_runs(runs_dir: Path) -> dict[tuple[int, int], Path]:
+    """Scan runs_dir for folders matching a binit0 combo.
+
+    Primary: recipe.json with x0.b_init_from=='zero',
+             M.kind=='AsymmetricTukeyBiweight', and (c_pos, c_neg) in COMBOS.
+    Fallback: no recipe.json — infer combo from folder name (e.g. '_c23')
+              and confirm by checking for F0_all.npy in session subdirs.
 
     Returns {(c_pos, c_neg): run_dir} for every found combo.
     """
     found: dict[tuple[int, int], Path] = {}
     for d in sorted(runs_dir.iterdir()):
+        if not d.is_dir():
+            continue
         rp = d / "recipe.json"
-        if not d.is_dir() or not rp.exists():
-            continue
-        try:
-            recipe = json.loads(rp.read_text())
-        except Exception:
-            continue
-        x0 = recipe.get("x0", {})
-        M  = recipe.get("M", {})
-        if (x0.get("b_init_from") == "zero"
-                and M.get("kind") == "AsymmetricTukeyBiweight"):
-            combo = (int(M["c_pos"]), int(M["c_neg"]))
-            if combo in COMBOS and combo not in found:
-                found[combo] = d
+        if rp.exists():
+            try:
+                recipe = json.loads(rp.read_text())
+            except Exception:
+                continue
+            x0 = recipe.get("x0", {})
+            M  = recipe.get("M", {})
+            if (x0.get("b_init_from") == "zero"
+                    and M.get("kind") == "AsymmetricTukeyBiweight"):
+                combo = (int(M["c_pos"]), int(M["c_neg"]))
+                if combo in COMBOS and combo not in found:
+                    found[combo] = d
+        else:
+            combo = _infer_combo_from_name(d.name)
+            if combo and combo in COMBOS and combo not in found:
+                if _looks_like_combo_run(d):
+                    found[combo] = d
     return found
 
 

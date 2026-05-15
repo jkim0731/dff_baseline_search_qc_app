@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-DEFAULT_PARENT_DIR = Path("/root/capsule/scratch/first_try")
+DEFAULT_PARENT_DIR = Path("/root/capsule/data")
 DEFAULT_DATA_DIR   = Path("/root/capsule/data")
 
 METRIC_DISPLAY = {

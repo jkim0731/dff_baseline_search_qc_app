@@ -17,7 +17,8 @@ from PyQt5.QtWidgets import (
 
 from base_qc_app.rois import crop_around_mask, get_roi_mask, load_plane_assets
 
-from .curation import DEFAULT_PATH, load_curation, lookup_decision, save_decision
+from .curation import (DEFAULT_PATH, FLAG_COLS, FLAGS,
+                        load_curation, lookup_decision, save_decision)
 from .data import (
     COMBO_KEY, COMBO_KEY_LIST, COMBO_KEYS, COMBO_LABEL, COMBOS,
     KEY_COMBO, METRIC_DISPLAY, TARGET_COEF, TRACE_KEYS,
@@ -96,18 +97,12 @@ class TracePanel(QWidget):
         # ── legend ────────────────────────────────────────────────────────────
         legend_area = QVBoxLayout(); legend_area.setSpacing(2)
 
-        # top ctrl row: IRLS/LOWESS toggle | stretch | dFF opacity | Home
+        # top ctrl row: IRLS/LOWESS toggle | stretch | Home
         ctrl = QHBoxLayout(); ctrl.setSpacing(4)
         self._baseline_mode = _BiToggle("IRLS", "LOWESS (L)", active=0)
         self._baseline_mode.toggled.connect(self.baseline_mode_changed.emit)
         ctrl.addWidget(self._baseline_mode)
         ctrl.addStretch()
-        ctrl.addWidget(QLabel("dFF opacity:"))
-        self._alpha_sl = QSlider(Qt.Horizontal)
-        self._alpha_sl.setRange(10, 100); self._alpha_sl.setValue(70)
-        self._alpha_sl.setFixedWidth(70); self._alpha_sl.setFixedHeight(16)
-        self._alpha_sl.valueChanged.connect(self._on_alpha_changed)
-        ctrl.addWidget(self._alpha_sl)
         self._home_btn = QPushButton("Home (H)")
         self._home_btn.setFixedHeight(18)
         self._home_btn.clicked.connect(self._home)
@@ -153,7 +148,6 @@ class TracePanel(QWidget):
 
         self._f_curves:   dict = {}
         self._dff_curves: dict = {}
-        self._dff_alpha = 178
         self._color_menu_built = False
 
     @property
@@ -185,11 +179,11 @@ class TracePanel(QWidget):
 
     def _apply_curve_pen(self, key):
         hex_c = self._colors[key]
+        pen = _make_pen(_pg_color(hex_c), width=2)
         if key in self._f_curves:
-            self._f_curves[key].setPen(_make_pen(_pg_color(hex_c), width=2))
+            self._f_curves[key].setPen(pen)
         if key in self._dff_curves:
-            # opacity is controlled via setOpacity; keep pen fully opaque
-            self._dff_curves[key].setPen(_make_pen(_pg_color(hex_c), width=2))
+            self._dff_curves[key].setPen(pen)
 
     def _build_plot_color_menu(self):
         for pw in (self.f_plot, self.dff_plot):
@@ -216,11 +210,9 @@ class TracePanel(QWidget):
         self.dff_plot.addItem(pg.InfiniteLine(
             pos=0, angle=0,
             pen=pg.mkPen(color=(180,180,180), width=1, style=Qt.DashLine)))
-        init_opacity = self._alpha_sl.value() / 100.0
         for key in TRACE_KEYS:
             self._dff_curves[key] = self.dff_plot.plot(
                 pen=_make_pen(_pg_color(self._colors[key]), width=2))
-            self._dff_curves[key].setOpacity(init_opacity)
         if not self._color_menu_built:
             self._build_plot_color_menu()
             self._color_menu_built = True
@@ -234,11 +226,6 @@ class TracePanel(QWidget):
         for curves in (self._f_curves, self._dff_curves):
             if key in curves:
                 curves[key].setVisible(checked)
-
-    def _on_alpha_changed(self, value):
-        opacity = value / 100.0
-        for curve in self._dff_curves.values():
-            curve.setOpacity(opacity)
 
     def _home(self):
         self.f_plot.enableAutoRange()
@@ -643,7 +630,14 @@ class CurationPanel(QWidget):
             layout.addWidget(rb)
         layout.addSpacing(12)
 
-        # notes
+        layout.addSpacing(12)
+        self._flag_checks: dict[str, QCheckBox] = {}
+        for col, label in zip(FLAG_COLS, [lbl for _, lbl in FLAGS]):
+            cb = QCheckBox(label)
+            self._flag_checks[col] = cb
+            layout.addWidget(cb)
+        layout.addSpacing(8)
+
         layout.addWidget(QLabel("Notes:"))
         self.notes_edit = QLineEdit()
         self.notes_edit.setFixedWidth(160)
@@ -681,19 +675,30 @@ class CurationPanel(QWidget):
     def get_notes(self) -> str:
         return self.notes_edit.text().strip()
 
-    def set_state(self, visual_best: str, verdict: str, notes: str = ""):
+    def get_flags(self) -> dict[str, bool]:
+        return {col: cb.isChecked() for col, cb in self._flag_checks.items()}
+
+    def set_flags(self, flags: dict):
+        for col, cb in self._flag_checks.items():
+            cb.setChecked(bool(flags.get(col, False)))
+
+    def set_state(self, visual_best: str, verdict: str, flags: dict | None = None,
+                  notes: str = ""):
         idx = self.visual_combo.findData(visual_best)
         if idx < 0:
             idx = self.visual_combo.findText(visual_best)
         self.visual_combo.setCurrentIndex(max(idx, 0))
         for v, rb in self._verdict_btns.items():
             rb.setChecked(v == verdict)
+        self.set_flags(flags or {})
         self.notes_edit.setText(notes)
 
     def clear(self):
         self.visual_combo.setCurrentIndex(0)
         for rb in self._verdict_btns.values():
             rb.setChecked(False)
+        for cb in self._flag_checks.values():
+            cb.setChecked(False)
         self.notes_edit.clear()
 
 
@@ -771,9 +776,15 @@ class MainWindow(QMainWindow):
                     self.status_label, self.list_label):
             top.addWidget(lbl); top.addSpacing(8)
         top.addStretch()
+        self.load_list_btn = QPushButton("Load List…")
+        self.load_list_btn.setFixedHeight(22)
+        self.clear_list_btn = QPushButton("Clear List")
+        self.clear_list_btn.setFixedHeight(22)
+        self.clear_list_btn.setEnabled(False)
         self.capture_btn = QPushButton("Capture (C)")
         self.capture_btn.setFixedHeight(22)
-        top.addWidget(self.capture_btn)
+        for btn in (self.load_list_btn, self.clear_list_btn, self.capture_btn):
+            top.addWidget(btn)
         root.addLayout(top)
 
         # body splitter
@@ -809,6 +820,8 @@ class MainWindow(QMainWindow):
 
     def _wire_signals(self):
         self.sess_combo.currentIndexChanged.connect(self._on_session_changed)
+        self.load_list_btn.clicked.connect(self._load_roi_list)
+        self.clear_list_btn.clicked.connect(self._clear_roi_list)
         self.capture_btn.clicked.connect(self._capture)
         self.curation.prev_btn.clicked.connect(self._prev_roi)
         self.curation.next_roi_btn.clicked.connect(self._next_roi)
@@ -817,6 +830,43 @@ class MainWindow(QMainWindow):
         self.trace_panel.baseline_mode_changed.connect(self._refresh_roi)
         self.roi_label.jumped.connect(self._jump_to_roi)
         self.list_label.jumped.connect(self._goto_list_entry)
+
+    # ── list loading ──────────────────────────────────────────────────────────
+
+    def _load_roi_list(self):
+        start = str(self._output_path.parent)
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load ROI list CSV", start, "CSV files (*.csv);;All files (*)")
+        if not path:
+            return
+        try:
+            import pandas as pd
+            df = pd.read_csv(path)
+            entries = list(zip(df["session_key"].astype(str),
+                               df["roi_index"].astype(int)))
+        except Exception as e:
+            self.status_label.setText(f"[CSV error: {e}]")
+            return
+        if not entries:
+            self.status_label.setText("[CSV is empty]")
+            return
+        self._roi_list = entries
+        self._list_pos = 0
+        self.clear_list_btn.setEnabled(True)
+        self.status_label.setText(
+            f"Loaded {len(entries)} ROIs from {Path(path).name}")
+        self._update_list_label()
+        self._goto_list_entry(0)
+
+    def _clear_roi_list(self):
+        self._roi_list = None
+        self._list_pos = 0
+        self.clear_list_btn.setEnabled(False)
+        self.list_label.set_display("")
+        self.roi_label.setVisible(True)
+        self.status_label.setText("List cleared — session mode")
+        if self._session_data is not None:
+            self._refresh_roi()
 
     # ── data loading ──────────────────────────────────────────────────────────
 
@@ -893,10 +943,13 @@ class MainWindow(QMainWindow):
         # Curation state
         dec = lookup_decision(self._curation_df, sd.session_key, idx)
         if dec is not None:
+            from .curation import FLAG_COLS as _FLAG_COLS
+            flags = {col: bool(dec.get(col, False)) for col in _FLAG_COLS}
             self.curation.set_state(
                 str(dec.get("visual_best", "—")),
                 str(dec.get("verdict", "—")),
-                str(dec.get("notes", "") or ""),
+                flags=flags,
+                notes=str(dec.get("notes", "") or ""),
             )
         else:
             self.curation.clear()
@@ -966,6 +1019,7 @@ class MainWindow(QMainWindow):
             noise_winner=noise_winner,
             visual_best=self.curation.get_visual_best(),
             verdict=self.curation.get_verdict(),
+            flags=self.curation.get_flags(),
             notes=self.curation.get_notes(),
             user=self._user,
             path=self._output_path,
@@ -1056,7 +1110,9 @@ def run(runs_dir: Path | None = None, output: Path | None = None, roi_list: Path
     while runs_dir is None:
         title = ("Select runs directory (contains numbered run sub-folders)"
                  if msg is None else f"⚠ {msg} — pick again, or Cancel to quit")
-        chosen = QFileDialog.getExistingDirectory(None, title, str(Path.home()))
+        _default_start = Path("/root/capsule/data")
+        _start = str(_default_start) if _default_start.exists() else str(Path.home())
+        chosen = QFileDialog.getExistingDirectory(None, title, _start)
         if not chosen:
             sys.exit(0)
         runs_dir = Path(chosen)

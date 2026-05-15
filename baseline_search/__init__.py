@@ -1,20 +1,18 @@
 """Recipe-driven baseline fitting (sweep runner).
 
-This package lives in two places in the repo:
-
-  * ``code/baseline_search/`` — original location, importable from notebooks
-    that already have ``code/`` on ``sys.path``.
-  * ``code/dff_baseline_search_app/baseline_search/`` — a sibling-of-GUI copy
-    so that "run a fit" and "QC the fit" share one folder.
-
-To make both copies work without each caller having to manage sys.path, the
-import-time bootstrap walks up the directory tree until it finds
-``baseline_fitting.py`` (the math module — kept at the repo root) and inserts
-that directory onto ``sys.path``. Up to 5 ancestor levels are searched.
+This package may live in several locations. To make all copies work without
+each caller managing sys.path, the import-time bootstrap first walks up the
+directory tree (up to 5 levels) looking for ``baseline_fitting.py``, then
+falls back to a set of well-known paths used in the CodeOcean environment.
 """
 
 import sys
 from pathlib import Path
+
+_FALLBACK_PATHS = [
+    Path("/code"),
+    Path("/root/capsule/code"),
+]
 
 
 def _bootstrap_code_dir() -> None:
@@ -24,6 +22,11 @@ def _bootstrap_code_dir() -> None:
         if (p / "baseline_fitting.py").exists():
             if str(p) not in sys.path:
                 sys.path.insert(0, str(p))
+            return
+    for fb in _FALLBACK_PATHS:
+        if (fb / "baseline_fitting.py").exists():
+            if str(fb) not in sys.path:
+                sys.path.insert(0, str(fb))
             return
 
 
