@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QKeyEvent
+from PyQt5.QtGui import QKeyEvent, QPalette
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFrame, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel,
@@ -97,12 +97,20 @@ class TracePanel(QWidget):
         # ── legend ────────────────────────────────────────────────────────────
         legend_area = QVBoxLayout(); legend_area.setSpacing(2)
 
-        # top ctrl row: IRLS/LOWESS toggle | stretch | Home
+        # top ctrl row: IRLS/LOWESS toggle | stretch | Clear | All | Home
         ctrl = QHBoxLayout(); ctrl.setSpacing(4)
         self._baseline_mode = _BiToggle("IRLS", "LOWESS (L)", active=0)
         self._baseline_mode.toggled.connect(self.baseline_mode_changed.emit)
         ctrl.addWidget(self._baseline_mode)
         ctrl.addStretch()
+        self._clear_btn = QPushButton("Clear (Z)")
+        self._clear_btn.setFixedHeight(18)
+        self._clear_btn.clicked.connect(self.clear_traces)
+        ctrl.addWidget(self._clear_btn)
+        self._all_btn = QPushButton("All (A)")
+        self._all_btn.setFixedHeight(18)
+        self._all_btn.clicked.connect(self.select_all_traces)
+        ctrl.addWidget(self._all_btn)
         self._home_btn = QPushButton("Home (H)")
         self._home_btn.setFixedHeight(18)
         self._home_btn.clicked.connect(self._home)
@@ -231,6 +239,22 @@ class TracePanel(QWidget):
         self.f_plot.enableAutoRange()
         self.dff_plot.enableAutoRange()
 
+    def clear_traces(self):
+        for btn in self._legend_btns.values():
+            btn.setChecked(False)
+
+    def select_all_traces(self):
+        for btn in self._legend_btns.values():
+            btn.setChecked(True)
+
+    def set_curated_bg(self, is_curated: bool):
+        if is_curated:
+            c = QApplication.instance().palette().color(QPalette.Window)
+            bg = (c.red(), c.green(), c.blue())
+        else:
+            bg = "w"
+        self._trace_glw.setBackground(bg)
+
     def highlight_winner(self, winner_key: str | None):
         """Make the winner button glow with a gold border."""
         for key, btn in self._legend_btns.items():
@@ -281,13 +305,9 @@ class NoiseCriterionPlot(QWidget):
         layout.setSpacing(0)
 
         self._glw = pg.GraphicsLayoutWidget()
-        self._glw.setFixedHeight(195)
+        self._glw.setFixedHeight(140)
         self._pi  = self._glw.addPlot()
-        self._pi.setTitle(
-            "|median(neg. residuals of F−F0trend)| per combo  vs  0.674·σ<sub>noise</sub>  (target)",
-            size="8pt",
-        )
-        self._pi.setLabel("left", "a.u.")
+        self._pi.setLabel("left", "a.u.", size="7pt")
         self._pi.setMouseEnabled(x=False, y=True)
         self._pi.setMenuEnabled(False)
         self._pi.showGrid(x=False, y=True, alpha=0.2)
@@ -296,34 +316,32 @@ class NoiseCriterionPlot(QWidget):
         ax = self._pi.getAxis("bottom")
         ax.setTicks([[(i, COMBO_LABEL[KEY_COMBO[k]]) for i, k in enumerate(COMBO_KEYS)]])
 
-        # Persistent target line (position updated each ROI)
+        # Persistent target line
         self._target_line = pg.InfiniteLine(
             angle=0, pos=0,
             pen=_make_pen((220, 30, 30), width=2, style=Qt.DashLine),
         )
-        self._target_label = pg.TextItem("target", anchor=(0.0, 1.2), color=(220, 30, 30))
         self._pi.addItem(self._target_line)
-        self._pi.addItem(self._target_label)
 
-        # Ratio reference line at 1.0 (relative axis, not used — absolute axis is cleaner)
-
-        self._bars: list = []          # one BarGraphItem per combo
+        self._bars: dict[str, pg.BarGraphItem] = {}
         self._text_items: list[pg.TextItem] = []
+        self._winner_key: str | None = None
+        self._visual_best_key: str | None = None
 
         layout.addWidget(self._glw)
 
     def update(self, med_neg: dict, target: float, winner_key: str | None):
-        # Remove stale items
-        for b in self._bars:
+        for b in self._bars.values():
             self._pi.removeItem(b)
-        self._bars = []
+        self._bars = {}
         for t in self._text_items:
             self._pi.removeItem(t)
         self._text_items = []
 
-        # Target line
+        self._winner_key      = winner_key
+        self._visual_best_key = None          # reset; set_visual_best() called after
+
         self._target_line.setValue(target)
-        self._target_label.setPos(len(COMBO_KEYS) - 0.5, target)
 
         finite_heights = []
         for i, key in enumerate(COMBO_KEYS):
@@ -334,19 +352,14 @@ class NoiseCriterionPlot(QWidget):
             finite_heights.append(h)
 
             r, g, b = _pg_color(TRACE_COLORS[key])
-            if key == winner_key:
-                brush = pg.mkBrush(r, g, b, 230)
-                pen   = pg.mkPen(color=(220, 170, 0), width=3)
-            else:
-                brush = pg.mkBrush(r, g, b, 110)
-                pen   = pg.mkPen(color=(140, 140, 140), width=1)
+            brush = pg.mkBrush(r, g, b, 230 if key == winner_key else 110)
+            pen   = pg.mkPen(color=(220, 170, 0), width=3) if key == winner_key \
+                    else pg.mkPen(color=(140, 140, 140), width=1)
 
-            # One BarGraphItem per bar avoids all list-brush rendering bugs
             bar = pg.BarGraphItem(x=[i], height=[h], width=0.6, brush=brush, pen=pen)
             self._pi.addItem(bar)
-            self._bars.append(bar)
+            self._bars[key] = bar
 
-        # Ratio text — i is always the real combo position, not a filtered index
         y_max = max(finite_heights + [target], default=1.0)
         for i, key in enumerate(COMBO_KEYS):
             val = med_neg.get(key, float("nan"))
@@ -368,6 +381,24 @@ class NoiseCriterionPlot(QWidget):
 
         self._pi.setYRange(0, y_max * 1.20, padding=0)
         self._pi.setXRange(-0.6, len(COMBO_KEYS) - 0.4, padding=0)
+
+    def set_visual_best(self, visual_best_key: str | None):
+        self._visual_best_key = visual_best_key
+        for key, bar in self._bars.items():
+            if key == visual_best_key:
+                bar.setOpts(pen=pg.mkPen(color=(220, 30, 30), width=3))
+            elif key == self._winner_key:
+                bar.setOpts(pen=pg.mkPen(color=(220, 170, 0), width=3))
+            else:
+                bar.setOpts(pen=pg.mkPen(color=(140, 140, 140), width=1))
+
+    def set_curated_bg(self, is_curated: bool):
+        if is_curated:
+            c = QApplication.instance().palette().color(QPalette.Window)
+            bg = (c.red(), c.green(), c.blue())
+        else:
+            bg = "w"
+        self._glw.setBackground(bg)
 
 
 # ── jump-to-index label ───────────────────────────────────────────────────────
@@ -442,6 +473,7 @@ class _BiToggle(QLabel):
         self._opts   = (a, b)
         self._active = active % 2
         self.setCursor(Qt.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.setStyleSheet(
             "QLabel{border:1px solid #aaa;border-radius:3px;padding:2px 7px;background:#ebebeb;}"
             "QLabel:hover{background:#ddd;border-color:#888;}")
@@ -469,13 +501,11 @@ class ImagePanel(QWidget):
         super().__init__(parent)
         layout = QVBoxLayout(self); layout.setContentsMargins(0,0,0,0); layout.setSpacing(4)
 
-        ctrl = QHBoxLayout(); ctrl.setSpacing(10)
-        self.zoom_toggle = _BiToggle("Zoom", "FOV (Z)", active=0)
-        self.img_toggle  = _BiToggle("Mean", "Max (A)", active=1)
+        self.zoom_toggle = _BiToggle("Zoom", "FOV (B)", active=0)
+        self.img_toggle  = _BiToggle("Mean", "Max (N)", active=1)
         self.mask_chk    = QCheckBox("Mask (M)"); self.mask_chk.setChecked(True)
-        for w in (self.zoom_toggle, self.img_toggle, self.mask_chk): ctrl.addWidget(w)
-        ctrl.addStretch()
-        layout.addLayout(ctrl)
+        for w in (self.zoom_toggle, self.img_toggle, self.mask_chk):
+            layout.addWidget(w)
 
         cg = QGroupBox("Contrast"); cgrid = QGridLayout(cg)
         cgrid.setContentsMargins(4,4,4,4); cgrid.setVerticalSpacing(2)
@@ -510,6 +540,14 @@ class ImagePanel(QWidget):
 
     def toggle_zoom(self): self.zoom_toggle.toggle()
     def toggle_img_mode(self): self.img_toggle.toggle()
+
+    def set_curated_bg(self, is_curated: bool):
+        if is_curated:
+            c = QApplication.instance().palette().color(QPalette.Window)
+            bg = (c.red(), c.green(), c.blue())
+        else:
+            bg = "w"
+        self.img_plot.setBackground(bg)
 
     def auto_contrast(self):
         if self._max_img is None: return
@@ -559,9 +597,10 @@ class MetricHistograms(QWidget):
         layout = QVBoxLayout(self); layout.setContentsMargins(0,0,0,0); layout.setSpacing(0)
         self._plots: dict = {}; self._lines: dict = {}; self._all: dict = {}
 
-        glw = pg.GraphicsLayoutWidget()
-        glw.setFixedHeight(len(METRIC_NAMES) * self._ROW_H)
-        layout.addWidget(glw)
+        self._glw = pg.GraphicsLayoutWidget()
+        self._glw.setFixedHeight(len(METRIC_NAMES) * self._ROW_H)
+        layout.addWidget(self._glw)
+        glw = self._glw
         for i, name in enumerate(METRIC_NAMES):
             pi = glw.addPlot(row=i, col=0)
             pi.setTitle(name, size="8pt"); pi.hideAxis("left")
@@ -589,6 +628,14 @@ class MetricHistograms(QWidget):
                 x0=edges[:-1], x1=edges[1:], height=counts,
                 brush=pg.mkBrush(136,136,136,180), pen=None))
 
+    def set_curated_bg(self, is_curated: bool):
+        if is_curated:
+            c = QApplication.instance().palette().color(QPalette.Window)
+            bg = (c.red(), c.green(), c.blue())
+        else:
+            bg = "w"
+        self._glw.setBackground(bg)
+
     def mark_roi(self, row: dict):
         for name in METRIC_NAMES:
             val = row.get(name, float("nan"))
@@ -601,56 +648,67 @@ class MetricHistograms(QWidget):
 class CurationPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QHBoxLayout(self); layout.setContentsMargins(4,4,4,4)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 4, 6, 4)
+        root.setSpacing(3)
 
-        # noise criterion winner (auto-filled)
-        layout.addWidget(QLabel("Noise winner:"))
+        # row 1: noise winner | visual best | verdict
+        row1 = QHBoxLayout(); row1.setSpacing(6)
+        row1.addWidget(QLabel("Noise winner:"))
         self.winner_lbl = QLabel("—")
         self.winner_lbl.setStyleSheet("font-weight:bold; color:#c06000; min-width:40px;")
-        layout.addWidget(self.winner_lbl)
-        layout.addSpacing(16)
-
-        # visual best
-        layout.addWidget(QLabel("Best (visual):"))
+        row1.addWidget(self.winner_lbl)
+        row1.addSpacing(12)
+        row1.addWidget(QLabel("Best (visual):"))
         self.visual_combo = QComboBox()
         self.visual_combo.addItem("—")
         for c in COMBOS:
             self.visual_combo.addItem(COMBO_LABEL[c], COMBO_KEY[c])
         self.visual_combo.addItem("unsure")
         self.visual_combo.setFixedWidth(80)
-        layout.addWidget(self.visual_combo)
-        layout.addSpacing(12)
-
-        # verdict
-        layout.addWidget(QLabel("Verdict:"))
+        row1.addWidget(self.visual_combo)
+        row1.addSpacing(10)
+        row1.addWidget(QLabel("Verdict:"))
         self._verdict_btns: dict[str, QRadioButton] = {}
         for v in ("agree", "disagree", "unsure"):
             rb = QRadioButton(v)
             self._verdict_btns[v] = rb
-            layout.addWidget(rb)
-        layout.addSpacing(12)
+            row1.addWidget(rb)
+        row1.addStretch()
+        root.addLayout(row1)
 
-        layout.addSpacing(12)
+        # row 2: flag checkboxes
+        row2 = QHBoxLayout(); row2.setSpacing(6)
         self._flag_checks: dict[str, QCheckBox] = {}
         for col, label in zip(FLAG_COLS, [lbl for _, lbl in FLAGS]):
             cb = QCheckBox(label)
             self._flag_checks[col] = cb
-            layout.addWidget(cb)
-        layout.addSpacing(8)
+            row2.addWidget(cb)
+        row2.addStretch()
+        root.addLayout(row2)
 
-        layout.addWidget(QLabel("Notes:"))
+        # already-curated indicator (shown above save buttons)
+        self._curated_lbl = QLabel("This ROI is already curated")
+        self._curated_lbl.setStyleSheet(
+            "color: #1a6b1a; font-weight: bold; font-style: italic; padding: 0px 2px;")
+        self._curated_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self._curated_lbl.setVisible(False)
+        root.addWidget(self._curated_lbl)
+
+        # row 3: notes | navigation buttons
+        row3 = QHBoxLayout(); row3.setSpacing(4)
+        row3.addWidget(QLabel("Notes:"))
         self.notes_edit = QLineEdit()
-        self.notes_edit.setFixedWidth(160)
-        layout.addWidget(self.notes_edit)
-
-        layout.addStretch()
-        self.prev_btn      = QPushButton("◀ Prev (J)")
-        self.next_roi_btn  = QPushButton("Next ▶ (K)")
-        self.save_btn      = QPushButton("Save (S)")
-        self.next_btn      = QPushButton("Save+Next (Space)")
+        row3.addWidget(self.notes_edit, stretch=1)
+        row3.addSpacing(8)
+        self.prev_btn     = QPushButton("◀ Prev (J)")
+        self.next_roi_btn = QPushButton("Next ▶ (K)")
+        self.save_btn     = QPushButton("Save (S)")
+        self.next_btn     = QPushButton("Save+Next (Space)")
         for btn in (self.prev_btn, self.next_roi_btn, self.save_btn, self.next_btn):
             btn.setFixedHeight(22)
-            layout.addWidget(btn)
+            row3.addWidget(btn)
+        root.addLayout(row3)
 
     def set_winner(self, winner_key: str | None):
         if winner_key is None:
@@ -700,6 +758,9 @@ class CurationPanel(QWidget):
         for cb in self._flag_checks.values():
             cb.setChecked(False)
         self.notes_edit.clear()
+
+    def set_curated_indicator(self, is_curated: bool):
+        self._curated_lbl.setVisible(is_curated)
 
 
 # ── main window ───────────────────────────────────────────────────────────────
@@ -776,6 +837,8 @@ class MainWindow(QMainWindow):
                     self.status_label, self.list_label):
             top.addWidget(lbl); top.addSpacing(8)
         top.addStretch()
+        self.select_examples_btn = QPushButton("Select Examples")
+        self.select_examples_btn.setFixedHeight(22)
         self.load_list_btn = QPushButton("Load List…")
         self.load_list_btn.setFixedHeight(22)
         self.clear_list_btn = QPushButton("Clear List")
@@ -783,46 +846,64 @@ class MainWindow(QMainWindow):
         self.clear_list_btn.setEnabled(False)
         self.capture_btn = QPushButton("Capture (C)")
         self.capture_btn.setFixedHeight(22)
-        for btn in (self.load_list_btn, self.clear_list_btn, self.capture_btn):
+        for btn in (self.select_examples_btn, self.load_list_btn,
+                    self.clear_list_btn, self.capture_btn):
             top.addWidget(btn)
         root.addLayout(top)
 
-        # body splitter
+        # body: horizontal splitter so the right-panel boundary is user-adjustable
         body = QSplitter(Qt.Horizontal)
+        self._body_splitter = body
 
-        # left: trace panel + noise bar (vertical splitter)
+        # left: trace panel on top, noise plot + curation side-by-side on bottom
         left_split = QSplitter(Qt.Vertical)
         self.trace_panel = TracePanel()
         self.trace_panel.init_curves()
         left_split.addWidget(self.trace_panel)
+
+        # bottom row: noise plot (left half) + curation panel (right half)
+        bottom_w  = QWidget()
+        bottom_lay = QHBoxLayout(bottom_w)
+        bottom_lay.setContentsMargins(0, 0, 0, 0)
+        bottom_lay.setSpacing(4)
         self.noise_plot = NoiseCriterionPlot()
-        left_split.addWidget(self.noise_plot)
-        left_split.setStretchFactor(0, 3)
-        left_split.setStretchFactor(1, 1)
+        self.curation   = CurationPanel()
+        bottom_lay.addWidget(self.noise_plot, stretch=1)
+        bottom_lay.addWidget(self.curation,   stretch=1)
+        left_split.addWidget(bottom_w)
+        left_split.setStretchFactor(0, 1)
+        left_split.setStretchFactor(1, 0)
         body.addWidget(left_split)
 
         # right: image + metric histograms
-        right = QWidget(); right.setFixedWidth(360)
+        right = QWidget(); right.setMinimumWidth(160)
         rl = QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(4)
         self.image_panel  = ImagePanel(); rl.addWidget(self.image_panel)
         line = QFrame(); line.setFrameShape(QFrame.HLine); rl.addWidget(line)
         self.metric_hists = MetricHistograms(); rl.addWidget(self.metric_hists)
         rl.addStretch()
         body.addWidget(right)
-        body.setStretchFactor(0, 1); body.setStretchFactor(1, 0)
+        body.setStretchFactor(0, 1)
+        body.setStretchFactor(1, 0)
         root.addWidget(body, stretch=1)
-
-        # curation bottom bar
-        self.curation = CurationPanel()
-        root.addWidget(self.curation)
 
         self._capture_dir: Path | None = None
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, '_body_sized', False):
+            total = self._body_splitter.width()
+            right_w = 240
+            self._body_splitter.setSizes([max(total - right_w, 400), right_w])
+            self._body_sized = True
+
     def _wire_signals(self):
         self.sess_combo.currentIndexChanged.connect(self._on_session_changed)
+        self.select_examples_btn.clicked.connect(self._open_select_panel)
         self.load_list_btn.clicked.connect(self._load_roi_list)
         self.clear_list_btn.clicked.connect(self._clear_roi_list)
         self.capture_btn.clicked.connect(self._capture)
+        self.curation.visual_combo.currentIndexChanged.connect(self._on_visual_best_changed)
         self.curation.prev_btn.clicked.connect(self._prev_roi)
         self.curation.next_roi_btn.clicked.connect(self._next_roi)
         self.curation.save_btn.clicked.connect(self._save)
@@ -830,6 +911,30 @@ class MainWindow(QMainWindow):
         self.trace_panel.baseline_mode_changed.connect(self._refresh_roi)
         self.roi_label.jumped.connect(self._jump_to_roi)
         self.list_label.jumped.connect(self._goto_list_entry)
+
+    def _on_visual_best_changed(self):
+        vb  = self.curation.get_visual_best()
+        key = vb if vb in COMBO_KEYS else None
+        # red border only when user chose a combo that differs from the noise winner
+        highlight = key if (key is not None and key != self._current_winner) else None
+        self.noise_plot.set_visual_best(highlight)
+
+    # ── select-examples panel ─────────────────────────────────────────────────
+
+    def _open_select_panel(self):
+        from .select_panel import SelectExamplesWindow
+        if not hasattr(self, "_select_win") or self._select_win is None:
+            self._select_win = SelectExamplesWindow(
+                sessions=self._sessions,
+                combo_runs=self._combo_runs,
+                parent=self,
+            )
+            self._select_win.setAttribute(Qt.WA_DeleteOnClose)
+            self._select_win.destroyed.connect(
+                lambda: setattr(self, "_select_win", None))
+        self._select_win.show()
+        self._select_win.raise_()
+        self._select_win.activateWindow()
 
     # ── list loading ──────────────────────────────────────────────────────────
 
@@ -954,6 +1059,12 @@ class MainWindow(QMainWindow):
         else:
             self.curation.clear()
             self.curation.set_winner(winner_key)
+            # default Best (visual) to the noise winner — no red highlight needed
+            if winner_key is not None:
+                combo_idx = self.curation.visual_combo.findData(winner_key)
+                if combo_idx >= 0:
+                    self.curation.visual_combo.setCurrentIndex(combo_idx)
+        self._update_curated_indicator(dec is not None)
 
     # ── navigation ────────────────────────────────────────────────────────────
 
@@ -1004,10 +1115,29 @@ class MainWindow(QMainWindow):
 
     # ── curation ─────────────────────────────────────────────────────────────
 
+    def _update_curated_indicator(self, is_curated: bool):
+        self.curation.set_curated_indicator(is_curated)
+        self.trace_panel.set_curated_bg(is_curated)
+        self.noise_plot.set_curated_bg(is_curated)
+        self.image_panel.set_curated_bg(is_curated)
+        self.metric_hists.set_curated_bg(is_curated)
+
     def _save(self):
         sd = self._session_data
         if sd is None: return
-        idx          = self._roi_idx
+        idx = self._roi_idx
+
+        # warn before overwriting an existing decision
+        if lookup_decision(self._curation_df, sd.session_key, idx) is not None:
+            ans = QMessageBox.warning(
+                self, "Overwrite curation?",
+                "This ROI already has a saved decision.\nReplace it?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if ans != QMessageBox.Yes:
+                return
+
         row          = sd.rois.iloc[idx]
         noise_winner = (COMBO_LABEL[KEY_COMBO[self._current_winner]]
                         if self._current_winner else "—")
@@ -1024,7 +1154,8 @@ class MainWindow(QMainWindow):
             user=self._user,
             path=self._output_path,
         )
-        self.status_label.setText("Saved")
+        self.status_label.setText(f"Saved → {self._output_path}")
+        self._update_curated_indicator(True)
 
     def _save_and_next(self):
         self._save()
@@ -1079,8 +1210,10 @@ class MainWindow(QMainWindow):
         nav = {Qt.Key_J: self._prev_roi, Qt.Key_K: self._next_roi,
                Qt.Key_S: self._save,     Qt.Key_Space: self._save_and_next,
                Qt.Key_C: self._capture,  Qt.Key_M: self.image_panel.mask_chk.toggle,
-               Qt.Key_Z: self.image_panel.toggle_zoom,
-               Qt.Key_A: self.image_panel.toggle_img_mode,
+               Qt.Key_B: self.image_panel.toggle_zoom,
+               Qt.Key_N: self.image_panel.toggle_img_mode,
+               Qt.Key_Z: self.trace_panel.clear_traces,
+               Qt.Key_A: self.trace_panel.select_all_traces,
                Qt.Key_L: self.trace_panel._baseline_mode.toggle,
                Qt.Key_H: self.trace_panel._home}
         if key in nav:
