@@ -12,6 +12,7 @@ FLAGS = [
     ("too_much_variation", "too much variation"),
     ("too_low",            "too low"),
     ("too_high",           "too high"),
+    ("bad_roi",            "bad roi"),
 ]
 FLAG_COLS = [f"flag_{name}" for name, _ in FLAGS]
 
@@ -21,7 +22,7 @@ COLUMNS = [
     *FLAG_COLS,
     "notes", "timestamp",
 ]
-DEFAULT_PATH = Path("/root/capsule/scratch/binit0_qc_curation.csv")
+DEFAULT_PATH = Path("/scratch/binit0_qc_curation.csv")
 
 
 def load_curation(path: Path) -> pd.DataFrame:
