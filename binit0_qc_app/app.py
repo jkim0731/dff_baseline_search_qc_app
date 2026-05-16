@@ -21,7 +21,7 @@ from .curation import (DEFAULT_PATH, FLAG_COLS, FLAGS,
                         load_curation, lookup_decision, save_decision)
 from .data import (
     COMBO_KEY, COMBO_KEY_LIST, COMBO_KEYS, COMBO_LABEL, COMBOS,
-    KEY_COMBO, METRIC_DISPLAY, TARGET_COEF, TRACE_KEYS,
+    KEY_COMBO, METRIC_DISPLAY, METRIC_LOG, METRIC_NAMES, TARGET_COEF, TRACE_KEYS,
     _safe_dff, aggregate_metrics, compute_noise_bar,
     discover_combo_runs, list_sessions, load_session,
 )
@@ -44,7 +44,6 @@ TRACE_LABELS = {
     "long":  "long",
     **{COMBO_KEY[c]: COMBO_LABEL[c] for c in COMBOS},
 }
-METRIC_NAMES = list(METRIC_DISPLAY.values())
 MASK_COLOR   = (255, 32, 32, 110)
 
 
@@ -99,7 +98,8 @@ class TracePanel(QWidget):
 
         # top ctrl row: IRLS/LOWESS toggle | stretch | Clear | All | Home
         ctrl = QHBoxLayout(); ctrl.setSpacing(4)
-        self._baseline_mode = _BiToggle("IRLS", "LOWESS (L)", active=0)
+        self._baseline_mode = _BiToggle("IRLS", "LOWESS", active=0)
+        self._baseline_mode.setEnabled(False)
         self._baseline_mode.toggled.connect(self.baseline_mode_changed.emit)
         ctrl.addWidget(self._baseline_mode)
         ctrl.addStretch()
@@ -238,6 +238,11 @@ class TracePanel(QWidget):
     def _home(self):
         self.f_plot.enableAutoRange()
         self.dff_plot.enableAutoRange()
+
+    def set_active_only(self, key: str | None):
+        """Check only the given key; uncheck all others."""
+        for k, btn in self._legend_btns.items():
+            btn.setChecked(k == key)
 
     def clear_traces(self):
         for btn in self._legend_btns.values():
@@ -476,7 +481,8 @@ class _BiToggle(QLabel):
         self.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.setStyleSheet(
             "QLabel{border:1px solid #aaa;border-radius:3px;padding:2px 7px;background:#ebebeb;}"
-            "QLabel:hover{background:#ddd;border-color:#888;}")
+            "QLabel:hover{background:#ddd;border-color:#888;}"
+            "QLabel:disabled{background:#f0f0f0;border-color:#ddd;}")
         self._refresh()
     def active(self): return self._active
     def setActive(self, idx, emit=True):
@@ -485,11 +491,22 @@ class _BiToggle(QLabel):
         self._active = idx; self._refresh()
         if emit: self.toggled.emit()
     def toggle(self): self.setActive(1 - self._active)
-    def mousePressEvent(self, ev): self.toggle(); super().mousePressEvent(ev)
+    def mousePressEvent(self, ev):
+        if self.isEnabled():
+            self.toggle()
+        super().mousePressEvent(ev)
+    def changeEvent(self, ev):
+        from PyQt5.QtCore import QEvent
+        if ev.type() == QEvent.EnabledChange:
+            self.setCursor(Qt.ArrowCursor if not self.isEnabled() else Qt.PointingHandCursor)
+            self._refresh()
+        super().changeEvent(ev)
     def _refresh(self):
         parts = []
         for i, o in enumerate(self._opts):
-            if i == self._active:
+            if not self.isEnabled():
+                parts.append(f"<span style='color:#ccc'>{o}</span>")
+            elif i == self._active:
                 parts.append(f"<b style='color:#111'>{o}</b>")
             else:
                 parts.append(f"<span style='color:#bbb'>{o}</span>")
@@ -592,6 +609,9 @@ class ImagePanel(QWidget):
 class MetricHistograms(QWidget):
     _ROW_H = 72
 
+    # Hard-coded display bounds for specific metrics; line clamped to these limits.
+    _METRIC_BOUNDS: dict = {"drift_metric": (-1.0, 3.0)}
+
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self); layout.setContentsMargins(0,0,0,0); layout.setSpacing(0)
@@ -603,7 +623,8 @@ class MetricHistograms(QWidget):
         glw = self._glw
         for i, name in enumerate(METRIC_NAMES):
             pi = glw.addPlot(row=i, col=0)
-            pi.setTitle(name, size="8pt"); pi.hideAxis("left")
+            title = f"log₁₀({name})" if name in METRIC_LOG else name
+            pi.setTitle(title, size="8pt"); pi.hideAxis("left")
             pi.getAxis("bottom").setStyle(tickTextOffset=2)
             pi.setMouseEnabled(x=False, y=False); pi.setMenuEnabled(False)
             line = pg.InfiniteLine(angle=90, pen=pg.mkPen("r", width=1))
@@ -615,7 +636,13 @@ class MetricHistograms(QWidget):
         for name in METRIC_NAMES:
             if name in agg_df.columns:
                 v = agg_df[name].to_numpy(float)
-                self._all[name] = v[np.isfinite(v)]
+                v = v[np.isfinite(v)]
+                if name in METRIC_LOG:
+                    v = np.log10(v[v > 0])
+                if name in self._METRIC_BOUNDS:
+                    lo, hi = self._METRIC_BOUNDS[name]
+                    v = v[(v >= lo) & (v <= hi)]
+                self._all[name] = v
         self._rebuild()
 
     def _rebuild(self):
@@ -627,6 +654,9 @@ class MetricHistograms(QWidget):
             pi.addItem(pg.BarGraphItem(
                 x0=edges[:-1], x1=edges[1:], height=counts,
                 brush=pg.mkBrush(136,136,136,180), pen=None))
+            if name in self._METRIC_BOUNDS:
+                lo, hi = self._METRIC_BOUNDS[name]
+                pi.setXRange(lo, hi, padding=0.02)
 
     def set_curated_bg(self, is_curated: bool):
         if is_curated:
@@ -638,9 +668,17 @@ class MetricHistograms(QWidget):
 
     def mark_roi(self, row: dict):
         for name in METRIC_NAMES:
-            val = row.get(name, float("nan"))
-            if np.isfinite(float(val)):
-                self._lines[name].setValue(float(val))
+            val = float(row.get(name, float("nan")))
+            if not np.isfinite(val):
+                continue
+            if name in METRIC_LOG:
+                if val <= 0:
+                    continue
+                val = np.log10(val)
+            if name in self._METRIC_BOUNDS:
+                lo, hi = self._METRIC_BOUNDS[name]
+                val = max(lo, min(hi, val))
+            self._lines[name].setValue(val)
 
 
 # ── curation panel ────────────────────────────────────────────────────────────
@@ -939,7 +977,7 @@ class MainWindow(QMainWindow):
     # ── list loading ──────────────────────────────────────────────────────────
 
     def _load_roi_list(self):
-        start = str(self._output_path.parent)
+        start = "/scratch"
         path, _ = QFileDialog.getOpenFileName(
             self, "Load ROI list CSV", start, "CSV files (*.csv);;All files (*)")
         if not path:
@@ -1001,8 +1039,14 @@ class MainWindow(QMainWindow):
         ts    = sd.timestamps
         F_roi = np.asarray(sd.F[idx])
 
-        # Build per-ROI baselines & dffs — switch between F0trend (IRLS) and F0 (LOWESS)
-        use_lowess = self.trace_panel.baseline_mode == "lowess"
+        # Noise bar (F0trend/IRLS residuals)
+        med_neg, target, winner_key = compute_noise_bar(idx, sd, use_f0trend=True)
+        self._current_winner = winner_key
+        self.noise_plot.update(med_neg, target, winner_key)
+        self.trace_panel.highlight_winner(winner_key)
+        self.curation.set_winner(winner_key)
+
+        # Build all traces (F0trend/IRLS); only winner shown by default
         baselines: dict = {}
         dffs:      dict = {}
         for key in TRACE_KEYS:
@@ -1013,20 +1057,12 @@ class MainWindow(QMainWindow):
                 baselines[key] = np.asarray(sd.baselines[key][idx])
                 dffs[key]      = np.asarray(sd.dff_long[idx])
             else:
-                b = np.asarray(
-                    sd.f0_arrays[key][idx] if use_lowess else sd.baselines[key][idx]
-                )
+                b = np.asarray(sd.baselines[key][idx])
                 baselines[key] = b
                 dffs[key]      = _safe_dff(F_roi, b)
 
+        self.trace_panel.set_active_only(winner_key)
         self.trace_panel.update(ts, F_roi, baselines, dffs)
-
-        # Noise bar always evaluates F0trend (IRLS) residuals — display mode only affects traces
-        med_neg, target, winner_key = compute_noise_bar(idx, sd, use_f0trend=True)
-        self._current_winner = winner_key
-        self.noise_plot.update(med_neg, target, winner_key)
-        self.trace_panel.highlight_winner(winner_key)
-        self.curation.set_winner(winner_key)
 
         # Image
         row          = sd.rois.iloc[idx]
@@ -1214,7 +1250,6 @@ class MainWindow(QMainWindow):
                Qt.Key_N: self.image_panel.toggle_img_mode,
                Qt.Key_Z: self.trace_panel.clear_traces,
                Qt.Key_A: self.trace_panel.select_all_traces,
-               Qt.Key_L: self.trace_panel._baseline_mode.toggle,
                Qt.Key_H: self.trace_panel._home}
         if key in nav:
             nav[key]()
