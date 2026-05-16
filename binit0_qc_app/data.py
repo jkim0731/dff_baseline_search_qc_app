@@ -33,6 +33,8 @@ METRIC_DISPLAY = {
     "sustained_metric": "sustained",
     "F_skewness":       "skewness",
 }
+METRIC_LOG   = frozenset()   # display names histogrammed in log₁₀ (none currently)
+METRIC_NAMES = list(METRIC_DISPLAY.values()) + ["drift_metric"]
 
 
 # ── run discovery ─────────────────────────────────────────────────────────────
@@ -132,6 +134,7 @@ class SessionData:
         return self.F.shape[0]
 
 
+
 def _safe_dff(F: np.ndarray, baseline: np.ndarray) -> np.ndarray:
     F = np.asarray(F, dtype=np.float32)
     b = np.asarray(baseline, dtype=np.float32)
@@ -215,6 +218,8 @@ def load_session(
         for key, disp in METRIC_DISPLAY.items()
         if (inp / f"{key}.npy").exists()
     })
+    if "fractional_change_from_first_frame" in rois.columns:
+        metrics["drift_metric"] = rois["fractional_change_from_first_frame"].to_numpy(float)
     return SessionData(
         session_key=session_key,
         inputs_dir=inp,
@@ -268,6 +273,11 @@ def aggregate_metrics(sessions: list[tuple[str, Path]]) -> pd.DataFrame:
                 for key, disp in METRIC_DISPLAY.items()
                 if (inp / f"{key}.npy").exists()
             })
+            rois_csv = inp / "sczdrift_df_all.csv"
+            if rois_csv.exists():
+                rois_df = pd.read_csv(rois_csv)
+                if "fractional_change_from_first_frame" in rois_df.columns:
+                    df["drift_metric"] = rois_df["fractional_change_from_first_frame"].to_numpy(float)
         except Exception:
             continue
         df["session_key"] = sess_key
