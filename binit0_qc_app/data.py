@@ -36,6 +36,9 @@ METRIC_DISPLAY = {
 METRIC_LOG   = frozenset()   # display names histogrammed in log₁₀ (none currently)
 METRIC_NAMES = list(METRIC_DISPLAY.values()) + ["drift_metric"]
 
+# Model: F0trend = b_inf + b_slow·exp(-t/t_slow) + b_fast·exp(-t/t_fast) - b_bright·exp(-t/t_bright)
+PARAM_NAMES = ["b_inf", "b_slow", "b_fast", "b_bright", "t_slow", "t_fast", "t_bright"]
+
 
 # ── run discovery ─────────────────────────────────────────────────────────────
 
@@ -126,6 +129,7 @@ class SessionData:
     dff_short:   np.ndarray    # (N, T) mmap precomputed
     dff_long:    np.ndarray    # (N, T) mmap precomputed
     f0_arrays:   dict          # combo_key -> (N,T) mmap F0 (for residuals)
+    res_all:     dict          # combo_key -> (N,7) fit parameters (may be empty)
     metrics:     pd.DataFrame  # per-roi, aligned with ROI axis
     rois:        pd.DataFrame  # plane_id, cell_roi_id, ...
 
@@ -143,6 +147,37 @@ def _safe_dff(F: np.ndarray, baseline: np.ndarray) -> np.ndarray:
     result = np.where(safe, (F - b) / np.where(safe, b, 1.0), 0.0).astype(np.float32)
     result[nan_mask] = np.nan
     return result
+
+
+# ── model component decomposition ────────────────────────────────────────────
+
+def compute_model_components(
+    roi_idx: int, sd: "SessionData", combo_key: str,
+) -> dict[str, np.ndarray] | None:
+    """Return {name: trace} for the 4 trend components of the chosen combo.
+
+    Model: F0trend = b_inf + b_slow·exp(-t/t_slow) + b_fast·exp(-t/t_fast)
+                           - b_bright·exp(-t/t_bright)
+    Returns None if res_all is unavailable for this combo.
+    """
+    if combo_key not in sd.res_all:
+        return None
+    params = sd.res_all[combo_key][roi_idx]
+    b_inf, b_slow, b_fast, b_bright, t_slow, t_fast, t_bright = params
+    t = (sd.timestamps - sd.timestamps[0]).astype(np.float64)
+
+    def _comp(amp: float, tau: float, sign: float = 1.0) -> np.ndarray:
+        if not np.isfinite(tau) or tau <= 0:
+            return np.zeros(len(t), dtype=np.float32)
+        return (sign * amp * np.exp(-t / tau)).astype(np.float32)
+
+    b_inf_arr = np.full(len(t), b_inf, dtype=np.float32)
+    return {
+        "b_inf":    b_inf_arr,
+        "b_slow":   _comp(b_slow,   t_slow)              + b_inf_arr,
+        "b_fast":   _comp(b_fast,   t_fast)              + b_inf_arr,
+        "b_bright": _comp(b_bright, t_bright, sign=-1.0) + b_inf_arr,
+    }
 
 
 # ── session listing ───────────────────────────────────────────────────────────
@@ -203,11 +238,15 @@ def load_session(
     dff_long  = np.load(inp / "dff_long_window_all_array.npy",  mmap_mode="r")
 
     f0_arrays: dict = {}
+    res_all:   dict = {}
     for combo in COMBOS:
         key      = COMBO_KEY[combo]
         sess_run = combo_run[combo] / session_key
         baselines[key] = np.load(sess_run / "F0trend_all.npy", mmap_mode="r")
         f0_arrays[key] = np.load(sess_run / "F0_all.npy",      mmap_mode="r")
+        res_path = sess_run / "res_all.npy"
+        if res_path.exists():
+            res_all[key] = np.load(res_path)
 
     rois_csv = inp / "sczdrift_df_all.csv"
     rois = (pd.read_csv(rois_csv) if rois_csv.exists() else
@@ -228,6 +267,7 @@ def load_session(
         baselines=baselines,
         dff_short=dff_short, dff_long=dff_long,
         f0_arrays=f0_arrays,
+        res_all=res_all,
         metrics=metrics, rois=rois,
     )
 

@@ -21,8 +21,9 @@ from .curation import (DEFAULT_PATH, FLAG_COLS, FLAGS,
                         load_curation, lookup_decision, save_decision)
 from .data import (
     COMBO_KEY, COMBO_KEY_LIST, COMBO_KEYS, COMBO_LABEL, COMBOS,
-    KEY_COMBO, METRIC_DISPLAY, METRIC_LOG, METRIC_NAMES, TARGET_COEF, TRACE_KEYS,
-    _safe_dff, aggregate_metrics, compute_noise_bar,
+    KEY_COMBO, METRIC_DISPLAY, METRIC_LOG, METRIC_NAMES, PARAM_NAMES,
+    TARGET_COEF, TRACE_KEYS,
+    _safe_dff, aggregate_metrics, compute_model_components, compute_noise_bar,
     discover_combo_runs, list_sessions, load_session,
 )
 
@@ -45,6 +46,14 @@ TRACE_LABELS = {
     **{COMBO_KEY[c]: COMBO_LABEL[c] for c in COMBOS},
 }
 MASK_COLOR   = (255, 32, 32, 110)
+
+# Component breakdown colors & line styles (F plot only)
+COMP_STYLES: dict[str, tuple] = {
+    "b_inf":    ("#555555", Qt.DashLine),
+    "b_slow":   ("#1565C0", Qt.SolidLine),
+    "b_fast":   ("#C62828", Qt.SolidLine),
+    "b_bright": ("#2E7D32", Qt.SolidLine),
+}
 
 
 def _pg_color(hex_c: str) -> tuple:
@@ -96,12 +105,15 @@ class TracePanel(QWidget):
         # ── legend ────────────────────────────────────────────────────────────
         legend_area = QVBoxLayout(); legend_area.setSpacing(2)
 
-        # top ctrl row: IRLS/LOWESS toggle | stretch | Clear | All | Home
+        # top ctrl row: IRLS/LOWESS (disabled) | Baseline/Components | stretch | Clear | All | Home
         ctrl = QHBoxLayout(); ctrl.setSpacing(4)
         self._baseline_mode = _BiToggle("IRLS", "LOWESS", active=0)
         self._baseline_mode.setEnabled(False)
         self._baseline_mode.toggled.connect(self.baseline_mode_changed.emit)
         ctrl.addWidget(self._baseline_mode)
+        self._comp_toggle = _BiToggle("Baseline", "Components (V)", active=0)
+        self._comp_toggle.toggled.connect(self._apply_comp_mode)
+        ctrl.addWidget(self._comp_toggle)
         ctrl.addStretch()
         self._clear_btn = QPushButton("Clear (Z)")
         self._clear_btn.setFixedHeight(18)
@@ -134,6 +146,7 @@ class TracePanel(QWidget):
             self._legend_btns[key] = btn
             btn_row.addWidget(btn)
         legend_area.addLayout(btn_row)
+
         layout.addLayout(legend_area)
 
         # ── plots ─────────────────────────────────────────────────────────────
@@ -154,8 +167,17 @@ class TracePanel(QWidget):
         self._trace_glw.ci.layout.setRowStretchFactor(1, 3)
         layout.addWidget(self._trace_glw)
 
+        self._param_lbl = QLabel("")
+        self._param_lbl.setStyleSheet(
+            "font-size: 8pt; color: #333; font-family: monospace; padding: 1px 4px;")
+        layout.addWidget(self._param_lbl)
+
         self._f_curves:   dict = {}
         self._dff_curves: dict = {}
+        self._comp_curves: dict = {}
+        self._comp_key:  str | None = None
+        self._comp_ts:   object     = None
+        self._comp_data: dict | None = None
         self._color_menu_built = False
 
     @property
@@ -209,7 +231,7 @@ class TracePanel(QWidget):
 
     def init_curves(self):
         self.f_plot.clear(); self.dff_plot.clear()
-        self._f_curves = {}; self._dff_curves = {}
+        self._f_curves = {}; self._dff_curves = {}; self._comp_curves = {}
 
         self._f_curves["F"] = self.f_plot.plot(pen=_make_pen("#222", width=1))
         for key in TRACE_KEYS:
@@ -221,6 +243,17 @@ class TracePanel(QWidget):
         for key in TRACE_KEYS:
             self._dff_curves[key] = self.dff_plot.plot(
                 pen=_make_pen(_pg_color(self._colors[key]), width=2))
+        self._comp_legend = pg.LegendItem(
+            offset=(10, 10), colCount=len(COMP_STYLES),
+            labelTextColor="#111111", labelTextSize="8pt",
+        )
+        self._comp_legend.setParentItem(self.f_plot.vb)
+        self._comp_legend.setVisible(False)
+        for name, (color, style) in COMP_STYLES.items():
+            c = self.f_plot.plot(pen=_make_pen(_pg_color(color), width=2, style=style))
+            c.setVisible(False)
+            self._comp_curves[name] = c
+            self._comp_legend.addItem(c, name)
         if not self._color_menu_built:
             self._build_plot_color_menu()
             self._color_menu_built = True
@@ -231,13 +264,56 @@ class TracePanel(QWidget):
             btn.setChecked(not btn.isChecked())
 
     def _on_toggle(self, key, checked):
-        for curves in (self._f_curves, self._dff_curves):
-            if key in curves:
-                curves[key].setVisible(checked)
+        if key in self._dff_curves:
+            self._dff_curves[key].setVisible(checked)
+        if key in self._f_curves:
+            comp_on = self._comp_toggle.active() == 1
+            hide_f = comp_on and key == self._comp_key
+            self._f_curves[key].setVisible(checked and not hide_f)
 
     def _home(self):
         self.f_plot.enableAutoRange()
         self.dff_plot.enableAutoRange()
+
+    def toggle_comp_mode(self):
+        self._comp_toggle.toggle()
+
+    def set_component_data(
+        self,
+        key: str | None,
+        ts: np.ndarray,
+        comp_dict: dict | None,
+    ):
+        self._comp_key  = key
+        self._comp_ts   = ts
+        self._comp_data = comp_dict
+        if comp_dict is not None and ts is not None:
+            for name, curve in self._comp_curves.items():
+                if name in comp_dict:
+                    curve.setData(ts, comp_dict[name])
+        self._apply_comp_mode()
+
+    def _apply_comp_mode(self):
+        comp_on = self._comp_toggle.active() == 1
+        has_data = self._comp_data is not None
+        for name, curve in self._comp_curves.items():
+            curve.setVisible(comp_on and has_data and name in self._comp_data)
+        self._comp_legend.setVisible(comp_on and has_data)
+        if self._comp_key and self._comp_key in self._f_curves:
+            btn_on = (self._comp_key in self._legend_btns
+                      and self._legend_btns[self._comp_key].isChecked())
+            self._f_curves[self._comp_key].setVisible(btn_on and not comp_on)
+
+    def set_param_text(self, combo_label: str, params: dict | None):
+        if params is None:
+            self._param_lbl.setText("")
+            return
+        def _fmt(v: float, is_time: bool) -> str:
+            if not np.isfinite(v): return "nan"
+            return f"{v:.1f}s" if is_time else (f"{v:.3g}" if abs(v) >= 1e4 else f"{v:.1f}")
+        time_params = {"t_slow", "t_fast", "t_bright"}
+        parts = [f"{n}={_fmt(params[n], n in time_params)}" for n in PARAM_NAMES if n in params]
+        self._param_lbl.setText(f"{combo_label}   " + "   ".join(parts))
 
     def set_active_only(self, key: str | None):
         """Check only the given key; uncheck all others."""
@@ -1064,6 +1140,18 @@ class MainWindow(QMainWindow):
         self.trace_panel.set_active_only(winner_key)
         self.trace_panel.update(ts, F_roi, baselines, dffs)
 
+        # Component breakdown + parameter readout for winner
+        comps  = (compute_model_components(idx, sd, winner_key)
+                  if winner_key and winner_key in sd.res_all else None)
+        self.trace_panel.set_component_data(winner_key, sd.timestamps, comps)
+        if winner_key and winner_key in sd.res_all:
+            raw = sd.res_all[winner_key][idx]
+            params = dict(zip(PARAM_NAMES, raw))
+            combo_lbl = COMBO_LABEL[KEY_COMBO[winner_key]]
+        else:
+            params, combo_lbl = None, ""
+        self.trace_panel.set_param_text(combo_lbl, params)
+
         # Image
         row          = sd.rois.iloc[idx]
         plane_id     = str(row["plane_id"])
@@ -1250,7 +1338,8 @@ class MainWindow(QMainWindow):
                Qt.Key_N: self.image_panel.toggle_img_mode,
                Qt.Key_Z: self.trace_panel.clear_traces,
                Qt.Key_A: self.trace_panel.select_all_traces,
-               Qt.Key_H: self.trace_panel._home}
+               Qt.Key_H: self.trace_panel._home,
+               Qt.Key_V: self.trace_panel.toggle_comp_mode}
         if key in nav:
             nav[key]()
             return
