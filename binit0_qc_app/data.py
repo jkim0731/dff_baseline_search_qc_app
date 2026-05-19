@@ -285,6 +285,14 @@ def compute_noise_bar(
     F_roi  = np.asarray(sd.F[roi_idx], dtype=np.float64)
     target = TARGET_COEF * float(sd.noise[roi_idx])
     med_neg: dict = {}
+
+    for key in ("short", "long"):
+        f0    = np.asarray(sd.baselines[key][roi_idx], dtype=np.float64)
+        valid = ~np.isnan(f0)
+        res   = F_roi - f0
+        neg   = res[valid & (res < 0)]
+        med_neg[key] = float(np.median(np.abs(neg))) if len(neg) > 10 else float("nan")
+
     for key in COMBO_KEYS:
         src   = sd.baselines[key] if use_f0trend else sd.f0_arrays[key]
         f0    = np.asarray(src[roi_idx], dtype=np.float64)
@@ -294,8 +302,15 @@ def compute_noise_bar(
         med_neg[key] = float(np.median(np.abs(neg))) if len(neg) > 10 else float("nan")
 
     winner_key, best_dist = None, float("inf")
-    for key, val in med_neg.items():
-        if np.isfinite(val) and abs(val - target) < best_dist:
+    for key in COMBO_KEYS:
+        val = med_neg.get(key, float("nan"))
+        if not np.isfinite(val):
+            continue
+        src = sd.baselines[key] if use_f0trend else sd.f0_arrays[key]
+        f0  = np.asarray(src[roi_idx], dtype=np.float64)
+        if np.nanmin(f0) < 1.0:
+            continue
+        if abs(val - target) < best_dist:
             best_dist  = abs(val - target)
             winner_key = key
     return med_neg, target, winner_key

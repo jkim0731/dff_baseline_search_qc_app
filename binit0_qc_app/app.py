@@ -244,8 +244,8 @@ class TracePanel(QWidget):
             self._dff_curves[key] = self.dff_plot.plot(
                 pen=_make_pen(_pg_color(self._colors[key]), width=2))
         self._comp_legend = pg.LegendItem(
-            offset=(10, 10), colCount=len(COMP_STYLES),
-            labelTextColor="#111111", labelTextSize="8pt",
+            offset=(-10, 10), colCount=len(COMP_STYLES),
+            labelTextSize="8pt",
         )
         self._comp_legend.setParentItem(self.f_plot.vb)
         self._comp_legend.setVisible(False)
@@ -254,6 +254,8 @@ class TracePanel(QWidget):
             c.setVisible(False)
             self._comp_curves[name] = c
             self._comp_legend.addItem(c, name)
+            _, label = self._comp_legend.items[-1]
+            label.setText(name, color=color)
         if not self._color_menu_built:
             self._build_plot_color_menu()
             self._color_menu_built = True
@@ -393,9 +395,9 @@ class NoiseCriterionPlot(QWidget):
         self._pi.setMenuEnabled(False)
         self._pi.showGrid(x=False, y=True, alpha=0.2)
 
-        # X axis: combo labels
+        # X axis: all trace labels (short, long, then combos)
         ax = self._pi.getAxis("bottom")
-        ax.setTicks([[(i, COMBO_LABEL[KEY_COMBO[k]]) for i, k in enumerate(COMBO_KEYS)]])
+        ax.setTicks([[(i, TRACE_LABELS[k]) for i, k in enumerate(TRACE_KEYS)]])
 
         # Persistent target line
         self._target_line = pg.InfiniteLine(
@@ -425,7 +427,7 @@ class NoiseCriterionPlot(QWidget):
         self._target_line.setValue(target)
 
         finite_heights = []
-        for i, key in enumerate(COMBO_KEYS):
+        for i, key in enumerate(TRACE_KEYS):
             val = med_neg.get(key, float("nan"))
             if not np.isfinite(val):
                 continue
@@ -433,16 +435,24 @@ class NoiseCriterionPlot(QWidget):
             finite_heights.append(h)
 
             r, g, b = _pg_color(TRACE_COLORS[key])
-            brush = pg.mkBrush(r, g, b, 230 if key == winner_key else 110)
-            pen   = pg.mkPen(color=(220, 170, 0), width=3) if key == winner_key \
-                    else pg.mkPen(color=(140, 140, 140), width=1)
+            is_candidate = key in COMBO_KEYS
+            if is_candidate:
+                alpha = 230 if key == winner_key else 110
+                pen   = pg.mkPen(color=(220, 170, 0), width=3) if key == winner_key \
+                        else pg.mkPen(color=(140, 140, 140), width=1)
+            else:
+                alpha = 60
+                pen   = pg.mkPen(color=(140, 140, 140), width=1)
 
-            bar = pg.BarGraphItem(x=[i], height=[h], width=0.6, brush=brush, pen=pen)
+            bar = pg.BarGraphItem(x=[i], height=[h], width=0.6,
+                                  brush=pg.mkBrush(r, g, b, alpha), pen=pen)
             self._pi.addItem(bar)
             self._bars[key] = bar
 
         y_max = max(finite_heights + [target], default=1.0)
-        for i, key in enumerate(COMBO_KEYS):
+        for i, key in enumerate(TRACE_KEYS):
+            if key not in COMBO_KEYS:
+                continue
             val = med_neg.get(key, float("nan"))
             if not np.isfinite(val) or target <= 0:
                 continue
@@ -461,7 +471,7 @@ class NoiseCriterionPlot(QWidget):
             self._text_items.append(ti)
 
         self._pi.setYRange(0, y_max * 1.20, padding=0)
-        self._pi.setXRange(-0.6, len(COMBO_KEYS) - 0.4, padding=0)
+        self._pi.setXRange(-0.6, len(TRACE_KEYS) - 0.4, padding=0)
 
     def set_visual_best(self, visual_best_key: str | None):
         self._visual_best_key = visual_best_key
