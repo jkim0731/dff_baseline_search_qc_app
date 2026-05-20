@@ -7,12 +7,14 @@ from pathlib import Path
 import pandas as pd
 
 FLAGS = [
-    ("t_fast_too_fast",    "t_fast too fast"),
-    ("b_fast_too_high",    "b_fast too high"),
-    ("too_much_variation", "too much variation"),
-    ("too_low",            "too low"),
-    ("too_high",           "too high"),
-    ("bad_roi",            "bad roi"),
+    ("t_fast_too_fast",      "t_fast too fast"),
+    ("b_fast_too_high",      "b_fast too high"),
+    ("too_much_variation",   "too much variation"),
+    ("too_low",              "too low"),
+    ("too_high",             "too high"),
+    ("empty_convexity",      "empty convexity"),
+    ("extrapolation_error",  "extrapolation error"),
+    ("bad_roi",              "bad roi"),
 ]
 FLAG_COLS = [f"flag_{name}" for name, _ in FLAGS]
 

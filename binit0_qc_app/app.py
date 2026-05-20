@@ -167,10 +167,17 @@ class TracePanel(QWidget):
         self._trace_glw.ci.layout.setRowStretchFactor(1, 3)
         layout.addWidget(self._trace_glw)
 
+        param_row = QHBoxLayout(); param_row.setContentsMargins(0, 0, 0, 0); param_row.setSpacing(0)
         self._param_lbl = QLabel("")
         self._param_lbl.setStyleSheet(
             "font-size: 8pt; color: #333; font-family: monospace; padding: 1px 4px;")
-        layout.addWidget(self._param_lbl)
+        self._noise_lbl = QLabel("")
+        self._noise_lbl.setStyleSheet(
+            "font-size: 8pt; color: #555; font-family: monospace; padding: 1px 4px;")
+        self._noise_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        param_row.addWidget(self._param_lbl, stretch=1)
+        param_row.addWidget(self._noise_lbl)
+        layout.addLayout(param_row)
 
         self._f_curves:   dict = {}
         self._dff_curves: dict = {}
@@ -305,6 +312,12 @@ class TracePanel(QWidget):
             btn_on = (self._comp_key in self._legend_btns
                       and self._legend_btns[self._comp_key].isChecked())
             self._f_curves[self._comp_key].setVisible(btn_on and not comp_on)
+
+    def set_noise(self, noise_val: float):
+        if np.isfinite(noise_val):
+            self._noise_lbl.setText(f"noise_std={noise_val:.4g}")
+        else:
+            self._noise_lbl.setText("")
 
     def set_param_text(self, combo_label: str, params: dict | None):
         if params is None:
@@ -451,8 +464,6 @@ class NoiseCriterionPlot(QWidget):
 
         y_max = max(finite_heights + [target], default=1.0)
         for i, key in enumerate(TRACE_KEYS):
-            if key not in COMBO_KEYS:
-                continue
             val = med_neg.get(key, float("nan"))
             if not np.isfinite(val) or target <= 0:
                 continue
@@ -776,40 +787,43 @@ class CurationPanel(QWidget):
         root.setContentsMargins(6, 4, 6, 4)
         root.setSpacing(3)
 
-        # row 1: noise winner | visual best | verdict
+        # row 1: noise winner + call radios | visual best dropdown
         row1 = QHBoxLayout(); row1.setSpacing(6)
         row1.addWidget(QLabel("Noise winner:"))
         self.winner_lbl = QLabel("—")
         self.winner_lbl.setStyleSheet("font-weight:bold; color:#c06000; min-width:40px;")
         row1.addWidget(self.winner_lbl)
-        row1.addSpacing(12)
-        row1.addWidget(QLabel("Best (visual):"))
-        self.visual_combo = QComboBox()
-        self.visual_combo.addItem("—")
-        for c in COMBOS:
-            self.visual_combo.addItem(COMBO_LABEL[c], COMBO_KEY[c])
-        self.visual_combo.addItem("unsure")
-        self.visual_combo.setFixedWidth(80)
-        row1.addWidget(self.visual_combo)
-        row1.addSpacing(10)
-        row1.addWidget(QLabel("Verdict:"))
+        row1.addSpacing(6)
         self._verdict_btns: dict[str, QRadioButton] = {}
-        for v in ("agree", "disagree", "unsure"):
+        for v in ("good", "maybe", "bad"):
             rb = QRadioButton(v)
             self._verdict_btns[v] = rb
             row1.addWidget(rb)
+        row1.addSpacing(20)
+        row1.addWidget(QLabel("Visual best:"))
+        self.visual_combo = QComboBox()
+        self.visual_combo.addItem("—")
+        self.visual_combo.addItem("short", "short")
+        self.visual_combo.addItem("long", "long")
+        for c in COMBOS:
+            self.visual_combo.addItem(COMBO_LABEL[c], COMBO_KEY[c])
+        self.visual_combo.setFixedWidth(80)
+        row1.addWidget(self.visual_combo)
         row1.addStretch()
         root.addLayout(row1)
 
-        # row 2: flag checkboxes
-        row2 = QHBoxLayout(); row2.setSpacing(6)
+        # rows 2a/2b: flag checkboxes split into two rows of 4
         self._flag_checks: dict[str, QCheckBox] = {}
-        for col, label in zip(FLAG_COLS, [lbl for _, lbl in FLAGS]):
-            cb = QCheckBox(label)
-            self._flag_checks[col] = cb
-            row2.addWidget(cb)
-        row2.addStretch()
-        root.addLayout(row2)
+        flag_items = list(zip(FLAG_COLS, [lbl for _, lbl in FLAGS]))
+        half = len(flag_items) // 2
+        for flag_row_items in (flag_items[:half], flag_items[half:]):
+            row = QHBoxLayout(); row.setSpacing(6)
+            for col, label in flag_row_items:
+                cb = QCheckBox(label)
+                self._flag_checks[col] = cb
+                row.addWidget(cb)
+            row.addStretch()
+            root.addLayout(row)
 
         # already-curated indicator (shown above save buttons)
         self._curated_lbl = QLabel("This ROI is already curated")
@@ -828,7 +842,7 @@ class CurationPanel(QWidget):
         self.prev_btn     = QPushButton("◀ Prev (J)")
         self.next_roi_btn = QPushButton("Next ▶ (K)")
         self.save_btn     = QPushButton("Save (S)")
-        self.next_btn     = QPushButton("Save+Next (Space)")
+        self.next_btn     = QPushButton("Save+Next (Enter)")
         for btn in (self.prev_btn, self.next_roi_btn, self.save_btn, self.next_btn):
             btn.setFixedHeight(22)
             row3.addWidget(btn)
@@ -842,11 +856,11 @@ class CurationPanel(QWidget):
             self.winner_lbl.setText(COMBO_LABEL[combo])
 
     def get_visual_best(self) -> str:
-        idx = self.visual_combo.currentIndex()
-        if idx == 0:
-            return "—"
         data = self.visual_combo.currentData()
-        return data if data is not None else self.visual_combo.currentText()
+        if data is not None:
+            return data
+        text = self.visual_combo.currentText()
+        return "—" if text in ("—", "") else text
 
     def get_verdict(self) -> str:
         for v, rb in self._verdict_btns.items():
@@ -950,6 +964,13 @@ class MainWindow(QMainWindow):
         self.roi_label.setMinimumWidth(90)
         self.plane_label  = QLabel("")
         self.roiid_label  = QLabel("")
+        self.noise_floor_label = QLabel("")
+        self.noise_floor_label.setStyleSheet(
+            "QLabel { color: #b35c00; font-weight: bold; font-size: 9pt; "
+            "background: #fff3cd; border: 1px solid #e6ac00; border-radius: 3px; "
+            "padding: 0px 5px; }"
+        )
+        self.noise_floor_label.setVisible(False)
         self.status_label = QLabel("")
         self.list_label   = _JumpEdit(color="#0055cc")
         self.list_label.setStyleSheet(
@@ -958,7 +979,7 @@ class MainWindow(QMainWindow):
         )
         self.list_label.setMinimumWidth(80)
         for lbl in (self.roi_label, self.plane_label, self.roiid_label,
-                    self.status_label, self.list_label):
+                    self.noise_floor_label, self.status_label, self.list_label):
             top.addWidget(lbl); top.addSpacing(8)
         top.addStretch()
         self.select_examples_btn = QPushButton("Select Examples")
@@ -1130,6 +1151,7 @@ class MainWindow(QMainWindow):
         self._current_winner = winner_key
         self.noise_plot.update(med_neg, target, winner_key)
         self.trace_panel.highlight_winner(winner_key)
+        self.trace_panel.set_noise(float(sd.noise[idx]))
         self.curation.set_winner(winner_key)
 
         # Build all traces (F0trend/IRLS); only winner shown by default
@@ -1162,6 +1184,19 @@ class MainWindow(QMainWindow):
             params, combo_lbl = None, ""
         self.trace_panel.set_param_text(combo_lbl, params)
 
+        # Noise-floor indicator (per-combo, all combos checked)
+        clamped_combos = [
+            key for key in COMBO_KEYS
+            if key in sd.noise_clamped and idx < len(sd.noise_clamped[key])
+            and sd.noise_clamped[key][idx]
+        ]
+        if clamped_combos:
+            labels = ", ".join(clamped_combos)
+            self.noise_floor_label.setText(f"noise-floored: {labels}")
+            self.noise_floor_label.setVisible(True)
+        else:
+            self.noise_floor_label.setVisible(False)
+
         # Image
         row          = sd.rois.iloc[idx]
         plane_id     = str(row["plane_id"])
@@ -1183,9 +1218,13 @@ class MainWindow(QMainWindow):
         dec = lookup_decision(self._curation_df, sd.session_key, idx)
         if dec is not None:
             from .curation import FLAG_COLS as _FLAG_COLS
-            flags = {col: bool(dec.get(col, False)) for col in _FLAG_COLS}
+            flags = {col: (lambda v: False if (isinstance(v, float) and np.isnan(v)) else bool(v))(dec.get(col, False))
+                     for col in _FLAG_COLS}
+            saved_vb = str(dec.get("visual_best", "—"))
+            if saved_vb == winner_key:
+                saved_vb = "—"
             self.curation.set_state(
-                str(dec.get("visual_best", "—")),
+                saved_vb,
                 str(dec.get("verdict", "—")),
                 flags=flags,
                 notes=str(dec.get("notes", "") or ""),
@@ -1193,11 +1232,6 @@ class MainWindow(QMainWindow):
         else:
             self.curation.clear()
             self.curation.set_winner(winner_key)
-            # default Best (visual) to the noise winner — no red highlight needed
-            if winner_key is not None:
-                combo_idx = self.curation.visual_combo.findData(winner_key)
-                if combo_idx >= 0:
-                    self.curation.visual_combo.setCurrentIndex(combo_idx)
         self._update_curated_indicator(dec is not None)
 
     # ── navigation ────────────────────────────────────────────────────────────
@@ -1342,7 +1376,7 @@ class MainWindow(QMainWindow):
     def keyPressEvent(self, event: QKeyEvent):
         key = event.key()
         nav = {Qt.Key_J: self._prev_roi, Qt.Key_K: self._next_roi,
-               Qt.Key_S: self._save,     Qt.Key_Space: self._save_and_next,
+               Qt.Key_S: self._save,     Qt.Key_Return: self._save_and_next,
                Qt.Key_C: self._capture,  Qt.Key_M: self.image_panel.mask_chk.toggle,
                Qt.Key_B: self.image_panel.toggle_zoom,
                Qt.Key_N: self.image_panel.toggle_img_mode,

@@ -130,6 +130,7 @@ class SessionData:
     dff_long:    np.ndarray    # (N, T) mmap precomputed
     f0_arrays:   dict          # combo_key -> (N,T) mmap F0 (for residuals)
     res_all:     dict          # combo_key -> (N,7) fit parameters (may be empty)
+    noise_clamped: dict        # combo_key -> (N,) bool: baseline was noise-floored
     metrics:     pd.DataFrame  # per-roi, aligned with ROI axis
     rois:        pd.DataFrame  # plane_id, cell_roi_id, ...
 
@@ -237,8 +238,9 @@ def load_session(
     dff_short = np.load(inp / "dff_short_window_all_array.npy", mmap_mode="r")
     dff_long  = np.load(inp / "dff_long_window_all_array.npy",  mmap_mode="r")
 
-    f0_arrays: dict = {}
-    res_all:   dict = {}
+    f0_arrays:     dict = {}
+    res_all:       dict = {}
+    noise_clamped: dict = {}
     for combo in COMBOS:
         key      = COMBO_KEY[combo]
         sess_run = combo_run[combo] / session_key
@@ -247,6 +249,9 @@ def load_session(
         res_path = sess_run / "res_all.npy"
         if res_path.exists():
             res_all[key] = np.load(res_path)
+        nc_path = sess_run / "noise_clamped.npy"
+        if nc_path.exists():
+            noise_clamped[key] = np.load(nc_path).astype(bool)
 
     rois_csv = inp / "sczdrift_df_all.csv"
     rois = (pd.read_csv(rois_csv) if rois_csv.exists() else
@@ -268,6 +273,7 @@ def load_session(
         dff_short=dff_short, dff_long=dff_long,
         f0_arrays=f0_arrays,
         res_all=res_all,
+        noise_clamped=noise_clamped,
         metrics=metrics, rois=rois,
     )
 
