@@ -316,6 +316,10 @@ def compute_noise_bar(
         f0  = np.asarray(src[roi_idx], dtype=np.float64)
         if np.nanmin(f0) < 1.0:
             continue
+        # Exclude combos where the fitted F0trend would have gone below the noise
+        # floor (before clamping) — indicates a physically invalid baseline.
+        if key in sd.noise_clamped and sd.noise_clamped[key][roi_idx]:
+            continue
         if abs(val - target) < best_dist:
             best_dist  = abs(val - target)
             winner_key = key
