@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QSizePolicy, QSlider, QSplitter, QVBoxLayout, QWidget,
 )
 
-from base_qc_app.rois import crop_around_mask, get_roi_mask, load_plane_assets
+from .rois import crop_around_mask, get_roi_mask, load_plane_assets
 
 from .curation import (DEFAULT_PATH, FLAG_COLS, FLAGS,
                         load_curation, lookup_decision, save_decision)
@@ -932,7 +932,7 @@ class MainWindow(QMainWindow):
         self._list_pos = 0
 
         self.setWindowTitle(
-            f"binit0 Noise QC — {user}" if user else "binit0 Noise QC"
+            f"DFF baseline search QC — {user}" if user else "DFF baseline search QC"
         )
         self.resize(1250, 760)
 

@@ -1,7 +1,7 @@
 """Entry point for the binit0 noise-criterion QC app.
 
 After `pip install -e .` in the parent directory, launch with:
-    binit0-qc
+    dff-qc
 """
 from __future__ import annotations
 
