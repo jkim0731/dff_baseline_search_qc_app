@@ -280,6 +280,54 @@ def load_session(
 
 # ── noise-criterion computation ───────────────────────────────────────────────
 
+_EXTRAP_SKIP_S      = 5.0
+_EXTRAP_BELOW_THR   = 0.5
+_EXTRAP_TBRIGHT_THR = 1.5
+
+
+def _has_extrapolation_error(
+    roi_idx: int, sd: SessionData, combo_key: str,
+    F_roi: np.ndarray, t_rel: np.ndarray, T_total: float,
+    n_skip: int, n_win: int, n_win_600: int,
+) -> bool:
+    """Return True if this combo's analytic F0 shows a Pattern A or B extrapolation error."""
+    if combo_key not in sd.res_all:
+        return False
+    params = sd.res_all[combo_key][roi_idx].astype(np.float64)
+    b_inf, b_slow, b_fast, b_bright, t_slow, t_fast, t_bright = params
+    if b_inf <= 0:
+        return False
+    if t_bright / T_total >= _EXTRAP_TBRIGHT_THR:
+        return False
+
+    f0 = np.full(len(t_rel), b_inf)
+    d1 = np.zeros(len(t_rel))
+    if t_slow   > 0:
+        e = np.exp(-t_rel / t_slow);  f0 += b_slow * e;   d1 -= b_slow   / t_slow   * e
+    if t_fast   > 0:
+        e = np.exp(-t_rel / t_fast);  f0 += b_fast * e;   d1 -= b_fast   / t_fast   * e
+    if t_bright > 0:
+        e = np.exp(-t_rel / t_bright); f0 -= b_bright * e; d1 += b_bright / t_bright * e
+
+    res_beg = F_roi[n_skip : n_skip + n_win] - f0[:n_win]
+    res_end = F_roi[-n_win:]                 - f0[-n_win:]
+
+    # Pattern A: use min of analytic F0 in first min(n_win, 600s) window
+    f0_beg_min = float(f0[:n_win_600].min())
+    if ((b_inf - f0_beg_min) / b_inf > _EXTRAP_BELOW_THR
+            and bool(np.all(res_beg >= 0))):
+        return True
+
+    # Pattern B: bleaching too large — F0 still far above b_inf at session end,
+    #            still decreasing, F below F0
+    if ((float(f0[-1]) - b_inf) / b_inf > _EXTRAP_BELOW_THR
+            and float(d1[-1]) < 0
+            and bool(np.all(res_end <= 0))):
+        return True
+
+    return False
+
+
 def compute_noise_bar(
     roi_idx: int, sd: SessionData, use_f0trend: bool = False,
 ) -> tuple[dict, float, str | None]:
@@ -307,14 +355,30 @@ def compute_noise_bar(
         neg   = res[valid & (res < 0)]
         med_neg[key] = float(np.median(np.abs(neg))) if len(neg) > 10 else float("nan")
 
+    # Session-level quantities for extrapolation check (computed once per call)
+    ts      = sd.timestamps
+    T_total = float(ts[-1] - ts[0])
+    dt      = float(np.median(np.diff(ts)))
+    n_skip  = int(np.searchsorted(ts, ts[0] + _EXTRAP_SKIP_S))
+    t_rel   = (ts[n_skip:] - ts[n_skip]).astype(np.float64)
+    n_win   = min(int(max(300., 0.10 * T_total) / dt), len(t_rel) // 3)
+    n_win_600 = min(n_win, int(600. / dt))
+
     winner_key, best_dist = None, float("inf")
     for key in COMBO_KEYS:
         val = med_neg.get(key, float("nan"))
         if not np.isfinite(val):
             continue
-        src = sd.baselines[key] if use_f0trend else sd.f0_arrays[key]
-        f0  = np.asarray(src[roi_idx], dtype=np.float64)
-        if np.nanmin(f0) < 1.0:
+        if key in sd.res_all:
+            _p = sd.res_all[key][roi_idx].astype(np.float64)
+            _b_inf, _b_slow, _b_fast, _b_bright, _t_slow, _t_fast, _t_bright = _p
+            _f0_an = np.full(len(t_rel), _b_inf)
+            if _t_slow   > 0: _f0_an += _b_slow   * np.exp(-t_rel / _t_slow)
+            if _t_fast   > 0: _f0_an += _b_fast   * np.exp(-t_rel / _t_fast)
+            if _t_bright > 0: _f0_an -= _b_bright * np.exp(-t_rel / _t_bright)
+            if float(np.nanmin(_f0_an)) < 1.0:
+                continue
+        if _has_extrapolation_error(roi_idx, sd, key, F_roi, t_rel, T_total, n_skip, n_win, n_win_600):
             continue
         if abs(val - target) < best_dist:
             best_dist  = abs(val - target)
