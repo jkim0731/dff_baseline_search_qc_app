@@ -1369,8 +1369,12 @@ class MainWindow(QMainWindow):
         path = out / f"capture{tag}_{ts}.png"
         # grabWindow captures from the screen compositor, so OpenGL widgets
         # render correctly without disrupting the GL framebuffer state.
+        # Save/restore geometry because grabWindow can trigger a compositor resize.
+        geom = self.geometry()
         screen = QApplication.primaryScreen()
         pix = screen.grabWindow(int(self.winId()))
+        if self.geometry() != geom:
+            self.setGeometry(geom)
         pix.save(str(path))
         self.status_label.setText(f"Saved: {path}")
 
