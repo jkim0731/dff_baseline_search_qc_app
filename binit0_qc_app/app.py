@@ -544,6 +544,9 @@ class _JumpEdit(QLineEdit):
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key_Escape:
             self._revert()
+        elif ev.key() in (Qt.Key_Return, Qt.Key_Enter):
+            ev.accept()            # mark consumed before state changes in _on_return
+            super().keyPressEvent(ev)
         else:
             super().keyPressEvent(ev)
 
