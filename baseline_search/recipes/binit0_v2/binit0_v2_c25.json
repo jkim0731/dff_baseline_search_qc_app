@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "description": "binit0_v2: b_bright_max=1*(P99-P1), b_inf_lb=P1(F); AsymmetricTukeyBiweight(c_pos=2, c_neg=5); skip_initial=5s; b_inf=last1000; t_fast=(30,300).",
+  "model": {
+    "kind": "biexp_bright_v1"
+  },
+  "x0": {
+    "kind": "biexp_bright_default",
+    "b_init_from": "zero",
+    "b_init_value": null,
+    "t_fast_init": 60.0,
+    "t_slow_init_from": "t_max/2",
+    "t_bright_init_from": "t_max/2",
+    "b_inf_init_from": "last_N_frames",
+    "b_inf_n_frames": 1000
+  },
+  "sigma": {
+    "kind": "noise_std",
+    "method": "mad"
+  },
+  "bounds": {
+    "kind": "biexp_bright_default",
+    "t_high_factor": 5.0,
+    "t_fast_max": 300.0,
+    "t_slow_min": 300.0,
+    "t_bright_min": 300.0,
+    "t_fast_min": 30.0,
+    "b_amp_max_factor": 2.0,
+    "b_bright_max_factor": 1.0,
+    "b_inf_lb_factor": 1.0
+  },
+  "M": {
+    "kind": "AsymmetricTukeyBiweight",
+    "c_pos": 2,
+    "c_neg": 5
+  },
+  "fluctuations": {
+    "method": "lowess",
+    "mode": "ratio",
+    "frac": 0.1,
+    "M": {
+      "kind": "same_as_trend"
+    },
+    "maxiter": 5,
+    "tol": 0.001
+  },
+  "fit": {
+    "backend": "jax",
+    "dtype": "float32",
+    "maxiter": 5,
+    "tol": 0.001,
+    "optimizer_options": {
+      "maxiter": 20000,
+      "ftol": 1e-12,
+      "gtol": 1e-10
+    }
+  },
+  "skip_initial_seconds": 5.0
+}
