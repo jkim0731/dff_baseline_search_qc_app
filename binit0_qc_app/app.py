@@ -15,14 +15,15 @@ from PyQt5.QtWidgets import (
     QSizePolicy, QSlider, QSplitter, QVBoxLayout, QWidget,
 )
 
-from base_qc_app.rois import crop_around_mask, get_roi_mask, load_plane_assets
+from .rois import crop_around_mask, get_roi_mask, load_plane_assets
 
 from .curation import (DEFAULT_PATH, FLAG_COLS, FLAGS,
                         load_curation, lookup_decision, save_decision)
 from .data import (
     COMBO_KEY, COMBO_KEY_LIST, COMBO_KEYS, COMBO_LABEL, COMBOS,
-    KEY_COMBO, METRIC_DISPLAY, METRIC_LOG, METRIC_NAMES, TARGET_COEF, TRACE_KEYS,
-    _safe_dff, aggregate_metrics, compute_noise_bar,
+    KEY_COMBO, METRIC_DISPLAY, METRIC_LOG, METRIC_NAMES, PARAM_NAMES,
+    TARGET_COEF, TRACE_KEYS,
+    _safe_dff, aggregate_metrics, compute_model_components, compute_noise_bar,
     discover_combo_runs, list_sessions, load_session,
 )
 
@@ -45,6 +46,14 @@ TRACE_LABELS = {
     **{COMBO_KEY[c]: COMBO_LABEL[c] for c in COMBOS},
 }
 MASK_COLOR   = (255, 32, 32, 110)
+
+# Component breakdown colors & line styles (F plot only)
+COMP_STYLES: dict[str, tuple] = {
+    "b_inf":    ("#555555", Qt.DashLine),
+    "b_slow":   ("#1565C0", Qt.SolidLine),
+    "b_fast":   ("#C62828", Qt.SolidLine),
+    "b_bright": ("#2E7D32", Qt.SolidLine),
+}
 
 
 def _pg_color(hex_c: str) -> tuple:
@@ -96,12 +105,15 @@ class TracePanel(QWidget):
         # ── legend ────────────────────────────────────────────────────────────
         legend_area = QVBoxLayout(); legend_area.setSpacing(2)
 
-        # top ctrl row: IRLS/LOWESS toggle | stretch | Clear | All | Home
+        # top ctrl row: IRLS/LOWESS (disabled) | Baseline/Components | stretch | Clear | All | Home
         ctrl = QHBoxLayout(); ctrl.setSpacing(4)
         self._baseline_mode = _BiToggle("IRLS", "LOWESS", active=0)
         self._baseline_mode.setEnabled(False)
         self._baseline_mode.toggled.connect(self.baseline_mode_changed.emit)
         ctrl.addWidget(self._baseline_mode)
+        self._comp_toggle = _BiToggle("Baseline", "Components (V)", active=0)
+        self._comp_toggle.toggled.connect(self._apply_comp_mode)
+        ctrl.addWidget(self._comp_toggle)
         ctrl.addStretch()
         self._clear_btn = QPushButton("Clear (Z)")
         self._clear_btn.setFixedHeight(18)
@@ -134,6 +146,7 @@ class TracePanel(QWidget):
             self._legend_btns[key] = btn
             btn_row.addWidget(btn)
         legend_area.addLayout(btn_row)
+
         layout.addLayout(legend_area)
 
         # ── plots ─────────────────────────────────────────────────────────────
@@ -154,8 +167,24 @@ class TracePanel(QWidget):
         self._trace_glw.ci.layout.setRowStretchFactor(1, 3)
         layout.addWidget(self._trace_glw)
 
+        param_row = QHBoxLayout(); param_row.setContentsMargins(0, 0, 0, 0); param_row.setSpacing(0)
+        self._param_lbl = QLabel("")
+        self._param_lbl.setStyleSheet(
+            "font-size: 8pt; color: #333; font-family: monospace; padding: 1px 4px;")
+        self._noise_lbl = QLabel("")
+        self._noise_lbl.setStyleSheet(
+            "font-size: 8pt; color: #555; font-family: monospace; padding: 1px 4px;")
+        self._noise_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        param_row.addWidget(self._param_lbl, stretch=1)
+        param_row.addWidget(self._noise_lbl)
+        layout.addLayout(param_row)
+
         self._f_curves:   dict = {}
         self._dff_curves: dict = {}
+        self._comp_curves: dict = {}
+        self._comp_key:  str | None = None
+        self._comp_ts:   object     = None
+        self._comp_data: dict | None = None
         self._color_menu_built = False
 
     @property
@@ -209,7 +238,7 @@ class TracePanel(QWidget):
 
     def init_curves(self):
         self.f_plot.clear(); self.dff_plot.clear()
-        self._f_curves = {}; self._dff_curves = {}
+        self._f_curves = {}; self._dff_curves = {}; self._comp_curves = {}
 
         self._f_curves["F"] = self.f_plot.plot(pen=_make_pen("#222", width=1))
         for key in TRACE_KEYS:
@@ -221,6 +250,19 @@ class TracePanel(QWidget):
         for key in TRACE_KEYS:
             self._dff_curves[key] = self.dff_plot.plot(
                 pen=_make_pen(_pg_color(self._colors[key]), width=2))
+        self._comp_legend = pg.LegendItem(
+            offset=(-10, 10), colCount=len(COMP_STYLES),
+            labelTextSize="8pt",
+        )
+        self._comp_legend.setParentItem(self.f_plot.vb)
+        self._comp_legend.setVisible(False)
+        for name, (color, style) in COMP_STYLES.items():
+            c = self.f_plot.plot(pen=_make_pen(_pg_color(color), width=2, style=style))
+            c.setVisible(False)
+            self._comp_curves[name] = c
+            self._comp_legend.addItem(c, name)
+            _, label = self._comp_legend.items[-1]
+            label.setText(name, color=color)
         if not self._color_menu_built:
             self._build_plot_color_menu()
             self._color_menu_built = True
@@ -231,13 +273,62 @@ class TracePanel(QWidget):
             btn.setChecked(not btn.isChecked())
 
     def _on_toggle(self, key, checked):
-        for curves in (self._f_curves, self._dff_curves):
-            if key in curves:
-                curves[key].setVisible(checked)
+        if key in self._dff_curves:
+            self._dff_curves[key].setVisible(checked)
+        if key in self._f_curves:
+            comp_on = self._comp_toggle.active() == 1
+            hide_f = comp_on and key == self._comp_key
+            self._f_curves[key].setVisible(checked and not hide_f)
 
     def _home(self):
         self.f_plot.enableAutoRange()
         self.dff_plot.enableAutoRange()
+
+    def toggle_comp_mode(self):
+        self._comp_toggle.toggle()
+
+    def set_component_data(
+        self,
+        key: str | None,
+        ts: np.ndarray,
+        comp_dict: dict | None,
+    ):
+        self._comp_key  = key
+        self._comp_ts   = ts
+        self._comp_data = comp_dict
+        if comp_dict is not None and ts is not None:
+            for name, curve in self._comp_curves.items():
+                if name in comp_dict:
+                    curve.setData(ts, comp_dict[name])
+        self._apply_comp_mode()
+
+    def _apply_comp_mode(self):
+        comp_on = self._comp_toggle.active() == 1
+        has_data = self._comp_data is not None
+        for name, curve in self._comp_curves.items():
+            curve.setVisible(comp_on and has_data and name in self._comp_data)
+        self._comp_legend.setVisible(comp_on and has_data)
+        if self._comp_key and self._comp_key in self._f_curves:
+            btn_on = (self._comp_key in self._legend_btns
+                      and self._legend_btns[self._comp_key].isChecked())
+            self._f_curves[self._comp_key].setVisible(btn_on and not comp_on)
+
+    def set_noise(self, noise_val: float):
+        if np.isfinite(noise_val):
+            self._noise_lbl.setText(f"noise_std={noise_val:.4g}")
+        else:
+            self._noise_lbl.setText("")
+
+    def set_param_text(self, combo_label: str, params: dict | None):
+        if params is None:
+            self._param_lbl.setText("")
+            return
+        def _fmt(v: float, is_time: bool) -> str:
+            if not np.isfinite(v): return "nan"
+            return f"{v:.1f}s" if is_time else (f"{v:.3g}" if abs(v) >= 1e4 else f"{v:.1f}")
+        time_params = {"t_slow", "t_fast", "t_bright"}
+        parts = [f"{n}={_fmt(params[n], n in time_params)}" for n in PARAM_NAMES if n in params]
+        self._param_lbl.setText(f"{combo_label}   " + "   ".join(parts))
 
     def set_active_only(self, key: str | None):
         """Check only the given key; uncheck all others."""
@@ -317,9 +408,9 @@ class NoiseCriterionPlot(QWidget):
         self._pi.setMenuEnabled(False)
         self._pi.showGrid(x=False, y=True, alpha=0.2)
 
-        # X axis: combo labels
+        # X axis: all trace labels (short, long, then combos)
         ax = self._pi.getAxis("bottom")
-        ax.setTicks([[(i, COMBO_LABEL[KEY_COMBO[k]]) for i, k in enumerate(COMBO_KEYS)]])
+        ax.setTicks([[(i, TRACE_LABELS[k]) for i, k in enumerate(TRACE_KEYS)]])
 
         # Persistent target line
         self._target_line = pg.InfiniteLine(
@@ -349,7 +440,7 @@ class NoiseCriterionPlot(QWidget):
         self._target_line.setValue(target)
 
         finite_heights = []
-        for i, key in enumerate(COMBO_KEYS):
+        for i, key in enumerate(TRACE_KEYS):
             val = med_neg.get(key, float("nan"))
             if not np.isfinite(val):
                 continue
@@ -357,16 +448,22 @@ class NoiseCriterionPlot(QWidget):
             finite_heights.append(h)
 
             r, g, b = _pg_color(TRACE_COLORS[key])
-            brush = pg.mkBrush(r, g, b, 230 if key == winner_key else 110)
-            pen   = pg.mkPen(color=(220, 170, 0), width=3) if key == winner_key \
-                    else pg.mkPen(color=(140, 140, 140), width=1)
+            is_candidate = key in COMBO_KEYS
+            if is_candidate:
+                alpha = 230 if key == winner_key else 110
+                pen   = pg.mkPen(color=(220, 170, 0), width=3) if key == winner_key \
+                        else pg.mkPen(color=(140, 140, 140), width=1)
+            else:
+                alpha = 60
+                pen   = pg.mkPen(color=(140, 140, 140), width=1)
 
-            bar = pg.BarGraphItem(x=[i], height=[h], width=0.6, brush=brush, pen=pen)
+            bar = pg.BarGraphItem(x=[i], height=[h], width=0.6,
+                                  brush=pg.mkBrush(r, g, b, alpha), pen=pen)
             self._pi.addItem(bar)
             self._bars[key] = bar
 
         y_max = max(finite_heights + [target], default=1.0)
-        for i, key in enumerate(COMBO_KEYS):
+        for i, key in enumerate(TRACE_KEYS):
             val = med_neg.get(key, float("nan"))
             if not np.isfinite(val) or target <= 0:
                 continue
@@ -385,7 +482,7 @@ class NoiseCriterionPlot(QWidget):
             self._text_items.append(ti)
 
         self._pi.setYRange(0, y_max * 1.20, padding=0)
-        self._pi.setXRange(-0.6, len(COMBO_KEYS) - 0.4, padding=0)
+        self._pi.setXRange(-0.6, len(TRACE_KEYS) - 0.4, padding=0)
 
     def set_visual_best(self, visual_best_key: str | None):
         self._visual_best_key = visual_best_key
@@ -447,6 +544,9 @@ class _JumpEdit(QLineEdit):
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key_Escape:
             self._revert()
+        elif ev.key() in (Qt.Key_Return, Qt.Key_Enter):
+            ev.accept()            # mark consumed before state changes in _on_return
+            super().keyPressEvent(ev)
         else:
             super().keyPressEvent(ev)
 
@@ -690,40 +790,43 @@ class CurationPanel(QWidget):
         root.setContentsMargins(6, 4, 6, 4)
         root.setSpacing(3)
 
-        # row 1: noise winner | visual best | verdict
+        # row 1: noise winner + call radios | visual best dropdown
         row1 = QHBoxLayout(); row1.setSpacing(6)
         row1.addWidget(QLabel("Noise winner:"))
         self.winner_lbl = QLabel("—")
         self.winner_lbl.setStyleSheet("font-weight:bold; color:#c06000; min-width:40px;")
         row1.addWidget(self.winner_lbl)
-        row1.addSpacing(12)
-        row1.addWidget(QLabel("Best (visual):"))
-        self.visual_combo = QComboBox()
-        self.visual_combo.addItem("—")
-        for c in COMBOS:
-            self.visual_combo.addItem(COMBO_LABEL[c], COMBO_KEY[c])
-        self.visual_combo.addItem("unsure")
-        self.visual_combo.setFixedWidth(80)
-        row1.addWidget(self.visual_combo)
-        row1.addSpacing(10)
-        row1.addWidget(QLabel("Verdict:"))
+        row1.addSpacing(6)
         self._verdict_btns: dict[str, QRadioButton] = {}
-        for v in ("agree", "disagree", "unsure"):
+        for v in ("good", "maybe", "bad"):
             rb = QRadioButton(v)
             self._verdict_btns[v] = rb
             row1.addWidget(rb)
+        row1.addSpacing(20)
+        row1.addWidget(QLabel("Visual best:"))
+        self.visual_combo = QComboBox()
+        self.visual_combo.addItem("—")
+        self.visual_combo.addItem("short", "short")
+        self.visual_combo.addItem("long", "long")
+        for c in COMBOS:
+            self.visual_combo.addItem(COMBO_LABEL[c], COMBO_KEY[c])
+        self.visual_combo.setFixedWidth(80)
+        row1.addWidget(self.visual_combo)
         row1.addStretch()
         root.addLayout(row1)
 
-        # row 2: flag checkboxes
-        row2 = QHBoxLayout(); row2.setSpacing(6)
+        # rows 2a/2b: flag checkboxes split into two rows of 4
         self._flag_checks: dict[str, QCheckBox] = {}
-        for col, label in zip(FLAG_COLS, [lbl for _, lbl in FLAGS]):
-            cb = QCheckBox(label)
-            self._flag_checks[col] = cb
-            row2.addWidget(cb)
-        row2.addStretch()
-        root.addLayout(row2)
+        flag_items = list(zip(FLAG_COLS, [lbl for _, lbl in FLAGS]))
+        half = len(flag_items) // 2
+        for flag_row_items in (flag_items[:half], flag_items[half:]):
+            row = QHBoxLayout(); row.setSpacing(6)
+            for col, label in flag_row_items:
+                cb = QCheckBox(label)
+                self._flag_checks[col] = cb
+                row.addWidget(cb)
+            row.addStretch()
+            root.addLayout(row)
 
         # already-curated indicator (shown above save buttons)
         self._curated_lbl = QLabel("This ROI is already curated")
@@ -742,7 +845,7 @@ class CurationPanel(QWidget):
         self.prev_btn     = QPushButton("◀ Prev (J)")
         self.next_roi_btn = QPushButton("Next ▶ (K)")
         self.save_btn     = QPushButton("Save (S)")
-        self.next_btn     = QPushButton("Save+Next (Space)")
+        self.next_btn     = QPushButton("Save+Next (Enter)")
         for btn in (self.prev_btn, self.next_roi_btn, self.save_btn, self.next_btn):
             btn.setFixedHeight(22)
             row3.addWidget(btn)
@@ -756,11 +859,11 @@ class CurationPanel(QWidget):
             self.winner_lbl.setText(COMBO_LABEL[combo])
 
     def get_visual_best(self) -> str:
-        idx = self.visual_combo.currentIndex()
-        if idx == 0:
-            return "—"
         data = self.visual_combo.currentData()
-        return data if data is not None else self.visual_combo.currentText()
+        if data is not None:
+            return data
+        text = self.visual_combo.currentText()
+        return "—" if text in ("—", "") else text
 
     def get_verdict(self) -> str:
         for v, rb in self._verdict_btns.items():
@@ -829,7 +932,7 @@ class MainWindow(QMainWindow):
         self._list_pos = 0
 
         self.setWindowTitle(
-            f"binit0 Noise QC — {user}" if user else "binit0 Noise QC"
+            f"DFF baseline search QC — {user}" if user else "DFF baseline search QC"
         )
         self.resize(1250, 760)
 
@@ -864,6 +967,13 @@ class MainWindow(QMainWindow):
         self.roi_label.setMinimumWidth(90)
         self.plane_label  = QLabel("")
         self.roiid_label  = QLabel("")
+        self.noise_floor_label = QLabel("")
+        self.noise_floor_label.setStyleSheet(
+            "QLabel { color: #b35c00; font-weight: bold; font-size: 9pt; "
+            "background: #fff3cd; border: 1px solid #e6ac00; border-radius: 3px; "
+            "padding: 0px 5px; }"
+        )
+        self.noise_floor_label.setVisible(False)
         self.status_label = QLabel("")
         self.list_label   = _JumpEdit(color="#0055cc")
         self.list_label.setStyleSheet(
@@ -872,7 +982,7 @@ class MainWindow(QMainWindow):
         )
         self.list_label.setMinimumWidth(80)
         for lbl in (self.roi_label, self.plane_label, self.roiid_label,
-                    self.status_label, self.list_label):
+                    self.noise_floor_label, self.status_label, self.list_label):
             top.addWidget(lbl); top.addSpacing(8)
         top.addStretch()
         self.select_examples_btn = QPushButton("Select Examples")
@@ -1044,6 +1154,7 @@ class MainWindow(QMainWindow):
         self._current_winner = winner_key
         self.noise_plot.update(med_neg, target, winner_key)
         self.trace_panel.highlight_winner(winner_key)
+        self.trace_panel.set_noise(float(sd.noise[idx]))
         self.curation.set_winner(winner_key)
 
         # Build all traces (F0trend/IRLS); only winner shown by default
@@ -1063,6 +1174,31 @@ class MainWindow(QMainWindow):
 
         self.trace_panel.set_active_only(winner_key)
         self.trace_panel.update(ts, F_roi, baselines, dffs)
+
+        # Component breakdown + parameter readout for winner
+        comps  = (compute_model_components(idx, sd, winner_key)
+                  if winner_key and winner_key in sd.res_all else None)
+        self.trace_panel.set_component_data(winner_key, sd.timestamps, comps)
+        if winner_key and winner_key in sd.res_all:
+            raw = sd.res_all[winner_key][idx]
+            params = dict(zip(PARAM_NAMES, raw))
+            combo_lbl = COMBO_LABEL[KEY_COMBO[winner_key]]
+        else:
+            params, combo_lbl = None, ""
+        self.trace_panel.set_param_text(combo_lbl, params)
+
+        # Noise-floor indicator (per-combo, all combos checked)
+        clamped_combos = [
+            key for key in COMBO_KEYS
+            if key in sd.noise_clamped and idx < len(sd.noise_clamped[key])
+            and sd.noise_clamped[key][idx]
+        ]
+        if clamped_combos:
+            labels = ", ".join(clamped_combos)
+            self.noise_floor_label.setText(f"noise-floored: {labels}")
+            self.noise_floor_label.setVisible(True)
+        else:
+            self.noise_floor_label.setVisible(False)
 
         # Image
         row          = sd.rois.iloc[idx]
@@ -1085,9 +1221,13 @@ class MainWindow(QMainWindow):
         dec = lookup_decision(self._curation_df, sd.session_key, idx)
         if dec is not None:
             from .curation import FLAG_COLS as _FLAG_COLS
-            flags = {col: bool(dec.get(col, False)) for col in _FLAG_COLS}
+            flags = {col: (lambda v: False if (isinstance(v, float) and np.isnan(v)) else bool(v))(dec.get(col, False))
+                     for col in _FLAG_COLS}
+            saved_vb = str(dec.get("visual_best", "—"))
+            if saved_vb == winner_key:
+                saved_vb = "—"
             self.curation.set_state(
-                str(dec.get("visual_best", "—")),
+                saved_vb,
                 str(dec.get("verdict", "—")),
                 flags=flags,
                 notes=str(dec.get("notes", "") or ""),
@@ -1095,11 +1235,6 @@ class MainWindow(QMainWindow):
         else:
             self.curation.clear()
             self.curation.set_winner(winner_key)
-            # default Best (visual) to the noise winner — no red highlight needed
-            if winner_key is not None:
-                combo_idx = self.curation.visual_combo.findData(winner_key)
-                if combo_idx >= 0:
-                    self.curation.visual_combo.setCurrentIndex(combo_idx)
         self._update_curated_indicator(dec is not None)
 
     # ── navigation ────────────────────────────────────────────────────────────
@@ -1234,8 +1369,12 @@ class MainWindow(QMainWindow):
         path = out / f"capture{tag}_{ts}.png"
         # grabWindow captures from the screen compositor, so OpenGL widgets
         # render correctly without disrupting the GL framebuffer state.
+        # Save/restore geometry because grabWindow can trigger a compositor resize.
+        geom = self.geometry()
         screen = QApplication.primaryScreen()
         pix = screen.grabWindow(int(self.winId()))
+        if self.geometry() != geom:
+            self.setGeometry(geom)
         pix.save(str(path))
         self.status_label.setText(f"Saved: {path}")
 
@@ -1244,13 +1383,14 @@ class MainWindow(QMainWindow):
     def keyPressEvent(self, event: QKeyEvent):
         key = event.key()
         nav = {Qt.Key_J: self._prev_roi, Qt.Key_K: self._next_roi,
-               Qt.Key_S: self._save,     Qt.Key_Space: self._save_and_next,
+               Qt.Key_S: self._save,     Qt.Key_Return: self._save_and_next,
                Qt.Key_C: self._capture,  Qt.Key_M: self.image_panel.mask_chk.toggle,
                Qt.Key_B: self.image_panel.toggle_zoom,
                Qt.Key_N: self.image_panel.toggle_img_mode,
                Qt.Key_Z: self.trace_panel.clear_traces,
                Qt.Key_A: self.trace_panel.select_all_traces,
-               Qt.Key_H: self.trace_panel._home}
+               Qt.Key_H: self.trace_panel._home,
+               Qt.Key_V: self.trace_panel.toggle_comp_mode}
         if key in nav:
             nav[key]()
             return
