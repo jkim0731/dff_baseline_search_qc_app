@@ -44,11 +44,9 @@ ModelSpec = Annotated[
 class BiexpBrightDefaultX0(_StrictModel):
     """Initial x0 for the 7-param biexp_bright_v1 model.
 
-    Replicates ``long_vs_short_baseline_window.ipynb`` cell 4cdf2e68:
-        x0 = [F.mean(),
-              b_init, b_init, b_init,
-              t_max/2, t_fast_init, t_max/2]
-    where b_init is per-ROI from ``b_init_from``.
+    b_inf is initialised from the last ``b_inf_n_frames`` frames of the
+    (trimmed) trace when ``b_inf_init_from="last_N_frames"``; otherwise
+    from the whole-trace mean.
     """
 
     kind: Literal["biexp_bright_default"] = "biexp_bright_default"
@@ -57,12 +55,13 @@ class BiexpBrightDefaultX0(_StrictModel):
         "mean_F_minus_short_baseline",
         "zero",
         "scalar",
-        "half_of_max_F_minus_min_F",
     ] = "mean_F_minus_long_baseline"
     b_init_value: Optional[float] = None  # required iff b_init_from == "scalar"
     t_fast_init: float = 60.0
     t_slow_init_from: Literal["t_max/2", "t_max/4"] = "t_max/2"
     t_bright_init_from: Literal["t_max/2", "t_max/4"] = "t_max/2"
+    b_inf_init_from: Literal["mean_F", "last_N_frames"] = "last_N_frames"
+    b_inf_n_frames: int = 1000
 
 
 X0Spec = Annotated[
@@ -106,10 +105,18 @@ SigmaSpec = Annotated[
 class BiexpBrightDefaultBounds(_StrictModel):
     """Bounds for the 7-param biexp_bright model.
 
-    Replicates the notebook:
-        [(0,None)]*4 + [(t_low, t_max*t_high_factor),
-                        (1, t_fast_max),
-                        (t_low, t_max*t_high_factor)]
+    When ``b_amp_max_factor`` is set, the upper bound for b_slow and b_fast is
+    ``b_amp_max_factor * (P99-P1)(F_roi)`` per ROI.  Set to None for unbounded.
+
+    ``b_bright_max_factor``: separate ub for b_bright; defaults to b_amp_max_factor.
+    ``b_inf_lb_factor``: lower bound for b_inf = factor * P1(F_roi). Default None (lb=0).
+
+    Relative time-constant lower bounds (effective lb = max(absolute_min, factor * t_max)):
+    ``t_slow_min_tmax_factor``: sets t_slow lb = max(t_slow_min, factor * t_max).
+    ``t_bright_min_tmax_factor``: sets t_bright lb = max(t_bright_min, factor * t_max).
+
+    ``b_fast_ptp_window_s``: if set, b_fast ub = P99-P1 of the first N seconds of the
+    trimmed trace (after skip_initial_seconds), rather than b_amp_max_factor * global ptp.
     """
 
     kind: Literal["biexp_bright_default"] = "biexp_bright_default"
@@ -117,7 +124,13 @@ class BiexpBrightDefaultBounds(_StrictModel):
     t_fast_max: float = 300.0
     t_slow_min: float = 300.0
     t_bright_min: float = 300.0
-    t_fast_min: float = 1.0
+    t_fast_min: float = 30.0
+    b_amp_max_factor: Optional[float] = 2.0
+    b_bright_max_factor: Optional[float] = None  # if None, falls back to b_amp_max_factor
+    b_inf_lb_factor: Optional[float] = None      # if None, b_inf lb = 0
+    t_slow_min_tmax_factor: Optional[float] = None    # if None, uses t_slow_min only
+    t_bright_min_tmax_factor: Optional[float] = None  # if None, uses t_bright_min only
+    b_fast_ptp_window_s: Optional[float] = None       # if None, uses b_amp_max_factor * global ptp
 
 
 BoundsSpec = Annotated[
@@ -219,6 +232,7 @@ class Recipe(_StrictModel):
     M: MSpec
     fluctuations: FluctuationsSpec
     fit: FitSpec = Field(default_factory=FitSpec)
+    skip_initial_seconds: float = 5.0
 
     def to_json(self, *, indent: int = 2) -> str:
         return self.model_dump_json(indent=indent)

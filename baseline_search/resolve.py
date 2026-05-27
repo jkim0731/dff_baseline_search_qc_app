@@ -34,15 +34,17 @@ class ResolvedFit:
     """Everything needed to call ``fit_baseline`` per ROI in a session."""
 
     # per-ROI
-    F_all: np.ndarray                        # (N, T)
-    timestamps: np.ndarray                   # (T,)
+    F_all: np.ndarray                        # (N, T) — trimmed (initial seconds removed)
+    timestamps: np.ndarray                   # (T,)   — trimmed
+    n_skip: int                              # frames removed from the start
     x0_all: np.ndarray                       # (N, n_params)
     sigma_all: Optional[np.ndarray]          # (N,) or None  (None ⇒ MAD inside fit)
 
-    # shared across ROIs
+    # shared across ROIs (or per-ROI when b_amp_max_factor is set)
     model_fn: Callable
     model_param_names: list[str]
-    bounds: list[tuple]
+    bounds: list[tuple]                      # shared fallback bounds
+    bounds_all: Optional[list]               # per-ROI bounds (N × 7 tuples); overrides bounds
     M: Any
     M_fluctuations: Optional[Any]            # None ⇒ fit_baseline default (M.with_xp(np))
     fit_baseline_kwargs: dict
@@ -98,6 +100,18 @@ def resolve(
             f"got {timestamps.shape}"
         )
 
+    # Trim initial seconds (unstable detector frames)
+    skip_secs = float(getattr(recipe, "skip_initial_seconds", 0.0))
+    n_skip = 0
+    if skip_secs > 0.0:
+        n_skip = int(np.searchsorted(timestamps, skip_secs))
+        F_all = F_all[:, n_skip:]
+        timestamps = timestamps[n_skip:]
+        if baseline_long is not None:
+            baseline_long = baseline_long[:, n_skip:]
+        if baseline_short is not None:
+            baseline_short = baseline_short[:, n_skip:]
+
     t_max = float(timestamps[-1])
 
     model_fn = MODEL_FNS[recipe.model.kind]
@@ -123,7 +137,14 @@ def resolve(
             f"expected {(F_all.shape[0],)}"
         )
 
-    bounds = BOUNDS_FNS[recipe.bounds.kind](recipe.bounds, t_max=t_max)
+    raw_bounds = BOUNDS_FNS[recipe.bounds.kind](recipe.bounds, t_max=t_max, F_all=F_all)
+    # Detect per-ROI vs shared bounds
+    if isinstance(raw_bounds[0], list):
+        bounds_all = raw_bounds            # list of N × 7-tuple lists
+        bounds = raw_bounds[0]             # shared fallback = first ROI (for validation)
+    else:
+        bounds_all = None
+        bounds = raw_bounds
     if len(bounds) != len(param_names):
         raise ValueError(
             f"bounds builder produced {len(bounds)} entries, "
@@ -145,11 +166,13 @@ def resolve(
     return ResolvedFit(
         F_all=F_all,
         timestamps=timestamps,
+        n_skip=n_skip,
         x0_all=x0_all,
         sigma_all=sigma_all,
         model_fn=model_fn,
         model_param_names=param_names,
         bounds=bounds,
+        bounds_all=bounds_all,
         M=M,
         M_fluctuations=M_fluctuations,
         fit_baseline_kwargs=fit_kwargs,

@@ -55,6 +55,30 @@ from baseline_fitting import fit_baseline  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
+# Array helpers (session-level, not per-ROI)
+# ---------------------------------------------------------------------------
+def _safe_dff(F: np.ndarray, baseline: np.ndarray) -> np.ndarray:
+    """(F - baseline) / baseline with safe divide; NaN where baseline ≈ 0."""
+    b = np.asarray(baseline, dtype=np.float64)
+    F64 = np.asarray(F, dtype=np.float64)
+    safe = (np.abs(b) > 1e-6) & (~np.isnan(b))
+    return np.where(safe, (F64 - b) / np.where(safe, b, 1.0), 0.0).astype(np.float32)
+
+
+def _med_neg_residuals(F: np.ndarray, baseline: np.ndarray) -> np.ndarray:
+    """Per-ROI median of |negative residuals|. NaN when fewer than 10 negative samples."""
+    res = np.asarray(F, dtype=np.float64) - np.asarray(baseline, dtype=np.float64)
+    N = res.shape[0]
+    out = np.full(N, np.nan, dtype=np.float32)
+    for i in range(N):
+        row = res[i]
+        neg = row[row < 0]
+        if len(neg) > 10:
+            out[i] = float(np.median(np.abs(neg)))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Per-ROI worker — must be top-level for joblib/loky pickling.
 # ---------------------------------------------------------------------------
 def _fit_one_roi(
@@ -200,6 +224,19 @@ def _run_session(
     np.save(sess_dir / "F0_all.npy",      F0_all)
     np.save(sess_dir / "res_all.npy",     params_all)
     np.save(sess_dir / "loss_all.npy",    loss_all)
+
+    # dff from each baseline stage
+    np.save(sess_dir / "dff_F0trend_all.npy",
+            _safe_dff(F, F0trend_all))
+    np.save(sess_dir / "dff_F0_all.npy",
+            _safe_dff(F, F0_all))
+
+    # median |negative residuals| per ROI for each baseline stage
+    np.save(sess_dir / "med_neg_residuals_F0trend.npy",
+            _med_neg_residuals(F, F0trend_all))
+    np.save(sess_dir / "med_neg_residuals_F0.npy",
+            _med_neg_residuals(F, F0_all))
+
     with open(sess_dir / "info.json", "w") as f:
         json.dump(
             {

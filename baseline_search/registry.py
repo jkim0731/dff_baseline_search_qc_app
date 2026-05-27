@@ -79,8 +79,6 @@ def _resolve_b_init(F_all, baseline_long, baseline_short, b_init_from, b_init_va
         if b_init_value is None:
             raise ValueError("b_init_from='scalar' requires b_init_value")
         return np.full(F_all.shape[0], float(b_init_value), dtype=F_all.dtype)
-    if b_init_from == "half_of_max_F_minus_min_F":
-        return (np.max(F_all, axis=1) - np.min(F_all, axis=1)) / 2.0
     raise ValueError(f"Unknown b_init_from: {b_init_from!r}")
 
 
@@ -99,10 +97,17 @@ def biexp_bright_default_x0(spec, F_all, t_max, baseline_long, baseline_short):
     )
     t_slow_init = _resolve_t_const(t_max, spec.t_slow_init_from)
     t_bright_init = _resolve_t_const(t_max, spec.t_bright_init_from)
-    F_mean = F_all.mean(axis=1)
+
+    b_inf_init_from = getattr(spec, "b_inf_init_from", "mean_F")
+    if b_inf_init_from == "last_N_frames":
+        n = int(getattr(spec, "b_inf_n_frames", 1000))
+        b_inf = F_all[:, -n:].mean(axis=1)
+    else:
+        b_inf = F_all.mean(axis=1)
+
     N = F_all.shape[0]
     x0 = np.empty((N, 7), dtype=np.float64)
-    x0[:, 0] = F_mean
+    x0[:, 0] = b_inf
     x0[:, 1] = b_init
     x0[:, 2] = b_init
     x0[:, 3] = b_init
@@ -147,17 +152,66 @@ SIGMA_FNS: dict[str, Callable] = {
 # ---------------------------------------------------------------------------
 # Bounds builders
 # ---------------------------------------------------------------------------
-def biexp_bright_default_bounds(spec, t_max):
+def biexp_bright_default_bounds(spec, t_max, F_all=None):
+    """Return bounds for the 7-param biexp_bright model.
+
+    When spec.b_amp_max_factor is set and F_all (N, T) is provided, returns a
+    per-ROI list of length N (each element a list of 7 tuples).  Otherwise
+    returns a single shared list of 7 tuples.
+
+    Optional fields on spec:
+      b_bright_max_factor: separate ub multiplier for b_bright (defaults to b_amp_max_factor)
+      b_inf_lb_factor: b_inf lower bound = factor * P1(F_roi) (defaults to 0)
+      t_slow_min_tmax_factor: t_slow lb = max(t_slow_min, factor * t_max)
+      t_bright_min_tmax_factor: t_bright lb = max(t_bright_min, factor * t_max)
+      b_fast_ptp_window_s: b_fast ub = P99-P1 of first N seconds of trimmed trace
+    """
+    # Effective time-constant lower bounds (relative or absolute)
+    t_slow_min_factor   = getattr(spec, "t_slow_min_tmax_factor",   None)
+    t_bright_min_factor = getattr(spec, "t_bright_min_tmax_factor", None)
+    t_slow_lb   = max(spec.t_slow_min,   t_slow_min_factor   * t_max) if t_slow_min_factor   is not None else spec.t_slow_min
+    t_bright_lb = max(spec.t_bright_min, t_bright_min_factor * t_max) if t_bright_min_factor is not None else spec.t_bright_min
+
     t_high = t_max * spec.t_high_factor
-    return [
-        (0.0, None),                          # b_inf
-        (0.0, None),                          # b_slow
-        (0.0, None),                          # b_fast
-        (0.0, None),                          # b_bright
-        (spec.t_slow_min, t_high),            # t_slow
-        (spec.t_fast_min, spec.t_fast_max),   # t_fast
-        (spec.t_bright_min, t_high),          # t_bright
+    time_bounds = [
+        (t_slow_lb,              t_high),           # t_slow
+        (spec.t_fast_min, spec.t_fast_max),         # t_fast
+        (t_bright_lb,            t_high),           # t_bright
     ]
+    b_amp_max_factor    = getattr(spec, "b_amp_max_factor",    None)
+    b_bright_max_factor = getattr(spec, "b_bright_max_factor", None)
+    b_inf_lb_factor     = getattr(spec, "b_inf_lb_factor",     None)
+    b_fast_ptp_window_s = getattr(spec, "b_fast_ptp_window_s", None)
+
+    if b_amp_max_factor is not None and F_all is not None:
+        # Per-ROI amplitude upper bounds from robust ptp (P99 - P1)
+        # F_all is already trimmed (initial seconds removed) by resolve()
+        p1  = np.percentile(F_all,  1, axis=1).astype(np.float64)
+        p99 = np.percentile(F_all, 99, axis=1).astype(np.float64)
+        ptp = p99 - p1
+        amp_ubs        = b_amp_max_factor * ptp
+        b_bright_factor = b_bright_max_factor if b_bright_max_factor is not None else b_amp_max_factor
+        bright_ubs     = b_bright_factor * ptp
+        b_inf_lbs      = b_inf_lb_factor * p1 if b_inf_lb_factor is not None else np.zeros(len(p1))
+
+        # b_fast upper bound: ptp of first N seconds of trimmed trace (per ROI)
+        if b_fast_ptp_window_s is not None:
+            n_win = max(1, min(int(b_fast_ptp_window_s * F_all.shape[1] / t_max), F_all.shape[1]))
+            F_win = F_all[:, :n_win]
+            fast_ubs = (np.percentile(F_win, 99, axis=1) - np.percentile(F_win, 1, axis=1)).astype(np.float64)
+        else:
+            fast_ubs = amp_ubs
+
+        return [
+            [(float(b_inf_lb), None),
+             (0.0, float(amp_ub)),
+             (0.0, float(fast_ub)),
+             (0.0, float(bright_ub))]
+            + time_bounds
+            for b_inf_lb, amp_ub, fast_ub, bright_ub in zip(b_inf_lbs, amp_ubs, fast_ubs, bright_ubs)
+        ]
+    shared_amp = (0.0, None)
+    return [(0.0, None), shared_amp, shared_amp, shared_amp] + time_bounds
 
 
 BOUNDS_FNS: dict[str, Callable] = {
