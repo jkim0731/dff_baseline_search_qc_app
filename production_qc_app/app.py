@@ -8,11 +8,10 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont, QPalette
 from PyQt5.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QFrame,
     QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow,
-    QPushButton, QRadioButton, QSizePolicy, QSlider, QSplitter,
+    QPushButton, QSizePolicy, QSlider, QSplitter,
     QVBoxLayout, QWidget,
 )
 
@@ -29,7 +28,7 @@ F_PEN        = pg.mkPen(color=(30, 30, 30), width=1)
 BASELINE_PEN = pg.mkPen(color=(220, 120, 0), width=2)
 DFF_PEN      = pg.mkPen(color=(31, 119, 180), width=1)
 EVENTS_PEN   = pg.mkPen(color=(200, 30, 30), width=1)
-MASK_COLOR   = (255, 50, 50, 160)   # RGBA for ROI contour
+MASK_COLOR   = (255, 50, 50, 160)
 
 _INVALID_STYLE = (
     "QLabel { background: #c0392b; color: white; font-size: 14pt; "
@@ -39,13 +38,13 @@ _VALID_STYLE = (
     "QLabel { background: #27ae60; color: white; font-size: 11pt; "
     "font-weight: bold; padding: 4px 10px; border-radius: 6px; }"
 )
-_DFF_BTN_COLORS = {
+_DFF_CB_COLORS = {
     "good":                    ("#27ae60", "white"),
     "initial bleaching issue": ("#e67e22", "white"),
     "OK":                      ("#2980b9", "white"),
     "bad":                     ("#c0392b", "white"),
 }
-_QC_BTN_COLORS = {
+_QC_CB_COLORS = {
     "good":      ("#27ae60", "white"),
     "OK":        ("#2980b9", "white"),
     "ambiguous": ("#8e44ad", "white"),
@@ -53,19 +52,14 @@ _QC_BTN_COLORS = {
 }
 
 
-def _btn_style(bg: str, fg: str, checked: bool) -> str:
+def _cb_style(bg: str, fg: str, checked: bool) -> str:
     if checked:
         return (
-            f"QPushButton {{ background-color: {bg}; color: {fg}; "
-            "font-weight: bold; border: 2px solid #222; "
-            "border-radius: 4px; padding: 3px 8px; }}"
+            f"QCheckBox {{ color: {fg}; font-weight: bold; "
+            f"background-color: {bg}; border-radius: 4px; "
+            "padding: 3px 8px; }"
         )
-    return (
-        "QPushButton { background-color: #e8e8e8; color: #444; "
-        "font-weight: normal; border: 1px solid #aaa; "
-        "border-radius: 4px; padding: 3px 8px; } "
-        "QPushButton:hover { background-color: #d8d8d8; }"
-    )
+    return "QCheckBox { color: #444; padding: 3px 8px; }"
 
 
 # ── scroll-Y ViewBox ──────────────────────────────────────────────────────────
@@ -88,6 +82,8 @@ class TracePanel(QWidget):
         layout.setSpacing(2)
 
         self._glw = pg.GraphicsLayoutWidget()
+        self._glw.setBackground('w')
+
         self.f_plot = self._glw.addPlot(
             row=0, col=0, viewBox=_ShiftYViewBox(), title="Corrected F  +  Baseline"
         )
@@ -104,11 +100,23 @@ class TracePanel(QWidget):
         self.f_plot.setLabel("left", "F (a.u.)")
         self.dff_plot.setLabel("left", "dFF")
 
+        # create legends and curves once — updated with setData(), never recreated
+        leg_f = self.f_plot.addLegend(offset=(10, 10))
+        self._f_curve        = self.f_plot.plot([], [], pen=F_PEN)
+        self._baseline_curve = self.f_plot.plot([], [], pen=BASELINE_PEN)
+        leg_f.addItem(self._f_curve, "F")
+        leg_f.addItem(self._baseline_curve, "baseline")
+
+        leg_d = self.dff_plot.addLegend(offset=(10, 10))
+        self._dff_curve    = self.dff_plot.plot([], [], pen=DFF_PEN)
+        self._events_curve = self.dff_plot.plot([], [], pen=EVENTS_PEN)
+        leg_d.addItem(self._dff_curve, "dFF")
+        leg_d.addItem(self._events_curve, "events")
+
         self._glw.ci.layout.setRowStretchFactor(0, 5)
         self._glw.ci.layout.setRowStretchFactor(1, 4)
         layout.addWidget(self._glw)
 
-        # events toggle
         ev_row = QHBoxLayout()
         ev_row.setContentsMargins(4, 0, 4, 2)
         self.events_chk = QCheckBox("Show events")
@@ -116,12 +124,6 @@ class TracePanel(QWidget):
         ev_row.addWidget(self.events_chk)
         ev_row.addStretch()
         layout.addLayout(ev_row)
-
-        self._f_curve        = None
-        self._baseline_curve = None
-        self._dff_curve      = None
-        self._events_curve   = None
-        self._loaded         = False
 
         self.events_chk.stateChanged.connect(self._toggle_events)
 
@@ -133,26 +135,16 @@ class TracePanel(QWidget):
         dff: np.ndarray,
         events: np.ndarray,
     ) -> None:
-        # F + baseline
-        self.f_plot.clear()
-        self._f_curve        = self.f_plot.plot(ts, F, pen=F_PEN, name="F")
-        self._baseline_curve = self.f_plot.plot(ts, baseline, pen=BASELINE_PEN, name="baseline")
-        leg_f = self.f_plot.addLegend(offset=(10, 10))
-        leg_f.addItem(self._f_curve, "F")
-        leg_f.addItem(self._baseline_curve, "baseline")
-
-        # dFF + events
-        self.dff_plot.clear()
-        self._dff_curve    = self.dff_plot.plot(ts, dff, pen=DFF_PEN, name="dFF")
-        self._events_curve = self.dff_plot.plot(ts, events, pen=EVENTS_PEN, name="events")
+        self._f_curve.setData(ts, F)
+        self._baseline_curve.setData(ts, baseline)
+        self._dff_curve.setData(ts, dff)
+        self._events_curve.setData(ts, events)
         self._events_curve.setVisible(self.events_chk.isChecked())
-        leg_d = self.dff_plot.addLegend(offset=(10, 10))
-        leg_d.addItem(self._dff_curve, "dFF")
-        leg_d.addItem(self._events_curve, "events")
+        self.f_plot.autoRange()
+        self.dff_plot.autoRange()
 
     def _toggle_events(self, state):
-        if self._events_curve is not None:
-            self._events_curve.setVisible(bool(state))
+        self._events_curve.setVisible(bool(state))
 
     def home(self):
         self.f_plot.autoRange()
@@ -172,10 +164,9 @@ class ImagePanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 4)
         layout.setSpacing(4)
 
-        # controls row
         ctrl = QHBoxLayout()
-        self._mean_btn = QPushButton("Mean")
-        self._max_btn  = QPushButton("Max")
+        self._mean_btn = QPushButton("Mean (m)")
+        self._max_btn  = QPushButton("Max (m)")
         self._mean_btn.setCheckable(True)
         self._max_btn.setCheckable(True)
         self._max_btn.setChecked(True)
@@ -190,7 +181,7 @@ class ImagePanel(QWidget):
         ctrl.addWidget(self._mean_btn)
         ctrl.addSpacing(8)
         self._zin_btn  = QPushButton("Zoom in  (+)")
-        self._zout_btn = QPushButton("Zoom out (−)")
+        self._zout_btn = QPushButton("Zoom out (=)")
         self._zin_btn.setFixedHeight(22)
         self._zout_btn.setFixedHeight(22)
         ctrl.addWidget(self._zin_btn)
@@ -198,7 +189,6 @@ class ImagePanel(QWidget):
         ctrl.addStretch()
         layout.addLayout(ctrl)
 
-        # contrast
         cg = QGroupBox("Contrast")
         cgrid = QGridLayout(cg)
         cgrid.setContentsMargins(4, 4, 4, 4)
@@ -210,8 +200,8 @@ class ImagePanel(QWidget):
             sl.setFixedHeight(16)
         self._lo_sl.setValue(0)
         self._hi_sl.setValue(1000)
-        self._auto_btn = QPushButton("Auto")
-        self._auto_btn.setFixedWidth(44)
+        self._auto_btn = QPushButton("Auto (c)")
+        self._auto_btn.setFixedWidth(64)
         cgrid.addWidget(QLabel("Lo"), 0, 0)
         cgrid.addWidget(self._lo_sl, 0, 1)
         cgrid.addWidget(QLabel("Hi"), 1, 0)
@@ -219,8 +209,8 @@ class ImagePanel(QWidget):
         cgrid.addWidget(self._auto_btn, 0, 2, 2, 1)
         layout.addWidget(cg)
 
-        # image plot — larger since no histograms
         self.img_plot = pg.PlotWidget()
+        self.img_plot.setBackground('w')
         self.img_plot.setMinimumSize(380, 380)
         self.img_plot.hideAxis("left")
         self.img_plot.hideAxis("bottom")
@@ -247,6 +237,13 @@ class ImagePanel(QWidget):
         self._mean_img = mean_img
         self._mask = mask
         self._pad = 40
+        self._auto_contrast()
+
+    def toggle_img_mode(self):
+        if self._mean_btn.isChecked():
+            self._max_btn.setChecked(True)
+        else:
+            self._mean_btn.setChecked(True)
         self._auto_contrast()
 
     def _current_fov(self) -> np.ndarray:
@@ -308,43 +305,41 @@ class ImagePanel(QWidget):
         self._redraw()
 
 
-# ── exclusive radio-style button group ───────────────────────────────────────
+# ── exclusive checkbox bar ────────────────────────────────────────────────────
 
-class _RadioButtonBar(QWidget):
-    """A row of exclusive toggle buttons with per-option colors."""
+class _CheckBoxBar(QWidget):
+    """Exclusive-but-deselectable row of colored QCheckBoxes."""
 
     def __init__(self, options: list[str], color_map: dict, parent=None):
         super().__init__(parent)
         self._options   = options
         self._color_map = color_map
-        self._buttons: dict[str, QPushButton] = {}
+        self._boxes: dict[str, QCheckBox] = {}
         self._current: str | None = None
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(4)
+        row.setSpacing(6)
         for opt in options:
-            btn = QPushButton(opt)
-            btn.setCheckable(False)
-            btn.setFixedHeight(26)
-            btn.clicked.connect(lambda checked, o=opt: self._select(o))
-            self._buttons[opt] = btn
-            row.addWidget(btn)
+            cb = QCheckBox(opt)
+            cb.clicked.connect(lambda checked, o=opt: self._select(o))
+            self._boxes[opt] = cb
+            row.addWidget(cb)
         row.addStretch()
         self._refresh_all()
 
     def _select(self, opt: str):
-        if self._current == opt:
-            self._current = None
-        else:
-            self._current = opt
+        self._current = None if self._current == opt else opt
         self._refresh_all()
 
     def _refresh_all(self):
-        for opt, btn in self._buttons.items():
+        for opt, cb in self._boxes.items():
             active = (opt == self._current)
+            cb.blockSignals(True)
+            cb.setChecked(active)
+            cb.blockSignals(False)
             bg, fg = self._color_map.get(opt, ("#e8e8e8", "#444"))
-            btn.setStyleSheet(_btn_style(bg, fg, active))
+            cb.setStyleSheet(_cb_style(bg, fg, active))
 
     def get_value(self) -> str:
         return self._current or ""
@@ -356,6 +351,9 @@ class _RadioButtonBar(QWidget):
     def clear(self):
         self._current = None
         self._refresh_all()
+
+    def toggle(self, opt: str):
+        self._select(opt)
 
 
 # ── main window ───────────────────────────────────────────────────────────────
@@ -442,7 +440,6 @@ class MainWindow(QMainWindow):
         self.validity_banner.setMinimumHeight(36)
         root.addWidget(self.validity_banner)
 
-        # ── divider ───────────────────────────────────────────────────────────
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
         line.setFrameShadow(QFrame.Sunken)
@@ -452,21 +449,17 @@ class MainWindow(QMainWindow):
         body = QSplitter(Qt.Horizontal)
         body.setChildrenCollapsible(False)
 
-        # left: trace plots
         self.trace_panel = TracePanel()
         body.addWidget(self.trace_panel)
 
-        # right panel
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(4, 0, 4, 4)
         right_layout.setSpacing(6)
 
-        # image
         self.image_panel = ImagePanel()
         right_layout.addWidget(self.image_panel)
 
-        # ── classification detail ─────────────────────────────────────────────
         self.class_detail_lbl = QLabel("")
         self.class_detail_lbl.setWordWrap(True)
         self.class_detail_lbl.setStyleSheet(
@@ -479,37 +472,34 @@ class MainWindow(QMainWindow):
         line2.setFrameShadow(QFrame.Sunken)
         right_layout.addWidget(line2)
 
-        # ── ROI QC checkboxes (below image) ───────────────────────────────────
-        qc_grp = QGroupBox("ROI QC")
+        qc_grp = QGroupBox("ROI QC  (u=good  i=OK  o=ambiguous  p=bad)")
         qc_row = QHBoxLayout(qc_grp)
         qc_row.setSpacing(6)
-        self.qc_bar = _RadioButtonBar(QC_LABEL_OPTIONS, _QC_BTN_COLORS)
+        self.qc_bar = _CheckBoxBar(QC_LABEL_OPTIONS, _QC_CB_COLORS)
         qc_row.addWidget(self.qc_bar)
         right_layout.addWidget(qc_grp)
 
-        # ── DFF quality ───────────────────────────────────────────────────────
-        dff_grp = QGroupBox("DFF quality")
+        dff_grp = QGroupBox("DFF quality  (q=good  w=bleaching  e=OK  r=bad)")
         dff_row = QHBoxLayout(dff_grp)
         dff_row.setSpacing(6)
-        self.dff_quality_bar = _RadioButtonBar(DFF_QUALITY_OPTIONS, _DFF_BTN_COLORS)
+        self.dff_quality_bar = _CheckBoxBar(DFF_QUALITY_OPTIONS, _DFF_CB_COLORS)
         dff_row.addWidget(self.dff_quality_bar)
         right_layout.addWidget(dff_grp)
 
-        # ── save row ──────────────────────────────────────────────────────────
         save_row = QHBoxLayout()
         self.save_btn      = QPushButton("Save (S)")
         self.save_next_btn = QPushButton("Save + Next (Enter)")
         self.save_btn.setFixedHeight(26)
         self.save_next_btn.setFixedHeight(26)
         self.save_btn.setStyleSheet(
-            "QPushButton { background: #2980b9; color: white; font-weight: bold; "
-            "border-radius: 4px; padding: 3px 10px; }"
-            "QPushButton:hover { background: #1f6899; }"
+            "QPushButton { background-color: #2980b9; color: white; font-weight: bold; "
+            "border-radius: 4px; padding: 3px 10px; } "
+            "QPushButton:hover { background-color: #1f6899; }"
         )
         self.save_next_btn.setStyleSheet(
-            "QPushButton { background: #27ae60; color: white; font-weight: bold; "
-            "border-radius: 4px; padding: 3px 10px; }"
-            "QPushButton:hover { background: #1e8449; }"
+            "QPushButton { background-color: #27ae60; color: white; font-weight: bold; "
+            "border-radius: 4px; padding: 3px 10px; } "
+            "QPushButton:hover { background-color: #1e8449; }"
         )
         save_row.addWidget(self.save_btn)
         save_row.addWidget(self.save_next_btn)
@@ -540,7 +530,6 @@ class MainWindow(QMainWindow):
     def _on_session_changed(self, idx: int):
         session_dir = self._session_dirs[idx]
         planes = list_planes(session_dir)
-        # rebuild plane buttons
         for btn in self._plane_btns.values():
             self._plane_btn_row.removeWidget(btn)
             btn.deleteLater()
@@ -595,14 +584,11 @@ class MainWindow(QMainWindow):
         dff      = plane.dff[idx]
         events   = plane.events[idx]
 
-        # traces
         self.trace_panel.load_roi(ts, F, baseline, dff, events)
 
-        # image
         mask = get_roi_mask(plane, idx)
         self.image_panel.set_roi(plane.max_img, plane.mean_img, mask)
 
-        # validity banner
         is_valid, reasons = plane.is_valid(idx)
         if is_valid:
             self.validity_banner.setStyleSheet(_VALID_STYLE)
@@ -622,11 +608,9 @@ class MainWindow(QMainWindow):
                 f"border={plane.border[idx]}"
             )
 
-        # roi info
         n = plane.n_rois
         self.roi_label.setText(f"{idx}  /  {n - 1}")
 
-        # progress
         session_name = self.sess_combo.currentText()
         n_curated = len(
             self._curation_df[
@@ -636,7 +620,6 @@ class MainWindow(QMainWindow):
         )
         self.progress_lbl.setText(f"Curated: {n_curated} / {n}")
 
-        # restore previous decision
         dec = lookup(self._curation_df, session_name, plane.plane_id, idx)
         if dec:
             self.dff_quality_bar.set_value(dec.get("dff_quality", ""))
@@ -682,13 +665,42 @@ class MainWindow(QMainWindow):
 
     def keyPressEvent(self, ev):
         key = ev.key()
-        if key in (Qt.Key_J,):
+        planes = list(self._plane_btns.keys())
+        if key == Qt.Key_J:
             self._step_roi(-1)
-        elif key in (Qt.Key_K,):
+        elif key == Qt.Key_K:
             self._step_roi(+1)
         elif key == Qt.Key_S:
             self._save()
         elif key in (Qt.Key_Return, Qt.Key_Enter):
             self._save_and_next()
+        elif key == Qt.Key_M:
+            self.image_panel.toggle_img_mode()
+        elif key == Qt.Key_Plus:
+            self.image_panel._zoom_in()
+        elif key == Qt.Key_Equal:
+            self.image_panel._zoom_out()
+        elif key == Qt.Key_C:
+            self.image_panel._auto_contrast()
+        elif key == Qt.Key_Q:
+            self.dff_quality_bar.toggle(DFF_QUALITY_OPTIONS[0])
+        elif key == Qt.Key_W:
+            self.dff_quality_bar.toggle(DFF_QUALITY_OPTIONS[1])
+        elif key == Qt.Key_E:
+            self.dff_quality_bar.toggle(DFF_QUALITY_OPTIONS[2])
+        elif key == Qt.Key_R:
+            self.dff_quality_bar.toggle(DFF_QUALITY_OPTIONS[3])
+        elif key == Qt.Key_U:
+            self.qc_bar.toggle(QC_LABEL_OPTIONS[0])
+        elif key == Qt.Key_I:
+            self.qc_bar.toggle(QC_LABEL_OPTIONS[1])
+        elif key == Qt.Key_O:
+            self.qc_bar.toggle(QC_LABEL_OPTIONS[2])
+        elif key == Qt.Key_P:
+            self.qc_bar.toggle(QC_LABEL_OPTIONS[3])
+        elif Qt.Key_1 <= key <= Qt.Key_8:
+            n = key - Qt.Key_1
+            if n < len(planes):
+                self._plane_btns[planes[n]].click()
         else:
             super().keyPressEvent(ev)
