@@ -704,7 +704,7 @@ class MainWindow(QMainWindow):
             self.image_panel._zoom_in()
         elif key == Qt.Key_Equal:
             self.image_panel._zoom_out()
-        elif key == Qt.Key_C and ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
+        elif key == Qt.Key_C and (ev.modifiers() & Qt.ControlModifier) and (ev.modifiers() & Qt.ShiftModifier):
             self.image_panel._auto_contrast()
         elif key == Qt.Key_C:
             self._capture()
