@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QFrame,
+    QButtonGroup, QCheckBox, QComboBox, QFrame,
     QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow,
     QPushButton, QSizePolicy, QSlider, QSplitter,
     QVBoxLayout, QWidget,
@@ -603,8 +602,8 @@ class MainWindow(QMainWindow):
             self.validity_banner.setStyleSheet(_VALID_STYLE)
             self.validity_banner.setText("✔  VALID  —  soma ✓  |  not dendrite ✓  |  not border ✓")
             self.class_detail_lbl.setText(
-                f"soma prob: {plane.soma_pred[idx]}  |  "
-                f"dendrite prob: {plane.dendrite_pred[idx]}  |  "
+                f"soma pred: {plane.soma_pred[idx]}  |  "
+                f"dendrite pred: {plane.dendrite_pred[idx]}  |  "
                 f"border: {plane.border[idx]}"
             )
         else:
@@ -705,7 +704,7 @@ class MainWindow(QMainWindow):
             self.image_panel._zoom_in()
         elif key == Qt.Key_Equal:
             self.image_panel._zoom_out()
-        elif key == Qt.Key_C and ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
+        elif key == Qt.Key_C and (ev.modifiers() & Qt.ControlModifier) and (ev.modifiers() & Qt.ShiftModifier):
             self.image_panel._auto_contrast()
         elif key == Qt.Key_C:
             self._capture()
