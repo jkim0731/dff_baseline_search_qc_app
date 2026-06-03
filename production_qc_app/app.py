@@ -662,9 +662,9 @@ class MainWindow(QMainWindow):
         self.progress_lbl.setText(f"Curated: {n_curated} / {self._plane.n_rois}")
         dq = self.dff_quality_bar.get_value() or "—"
         ql = self.qc_bar.get_value() or "—"
-        self.status_lbl.setText(
-            f"✔ Saved ROI {self._roi_idx}  [dff: {dq}  |  qc: {ql}]"
-        )
+        msg = f"✔ Saved ROI {self._roi_idx}  [dff: {dq}  |  qc: {ql}]"
+        self.status_lbl.setText(msg)
+        print(f"{msg}  →  {self._curation_path}")
 
     def _save_and_next(self):
         self._save()
