@@ -119,7 +119,7 @@ class TracePanel(QWidget):
 
         ev_row = QHBoxLayout()
         ev_row.setContentsMargins(4, 0, 4, 2)
-        self.events_chk = QCheckBox("Show events")
+        self.events_chk = QCheckBox("Show events (v)")
         self.events_chk.setChecked(True)
         ev_row.addWidget(self.events_chk)
         ev_row.addStretch()
@@ -697,6 +697,8 @@ class MainWindow(QMainWindow):
             self._save()
         elif key in (Qt.Key_Return, Qt.Key_Enter):
             self._save_and_next()
+        elif key == Qt.Key_V:
+            self.trace_panel.events_chk.toggle()
         elif key == Qt.Key_M:
             self.image_panel.toggle_img_mode()
         elif key == Qt.Key_Plus:
