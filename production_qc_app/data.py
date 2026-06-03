@@ -14,12 +14,7 @@ DATA_DIR = Path("/root/capsule/data")
 
 
 def list_session_dirs(data_dir: Path = DATA_DIR) -> list[Path]:
-    return sorted(
-        p for p in data_dir.iterdir()
-        if p.is_dir()
-        and p.name.startswith("multiplane-ophys_")
-        and "_processed_" in p.name
-    )
+    return sorted(p for p in data_dir.iterdir() if p.is_dir())
 
 
 def list_planes(session_dir: Path) -> list[str]:
