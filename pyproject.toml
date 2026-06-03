@@ -13,16 +13,18 @@ dependencies = [
     "pyqtgraph>=0.13",
     "numpy>=1.25",
     "pandas>=1.5",
+    "h5py>=3.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "joblib>=1.3",
 ]
 
 [project.scripts]
-dff-qc-explore  = "base_qc_app.app:run"
-dff-qc-detailed = "binit0_qc_app.main:main"
-dff-fit         = "baseline_search.run:main"
+dff-qc-explore     = "base_qc_app.app:run"
+dff-qc-detailed    = "binit0_qc_app.main:main"
+dff-qc-production  = "production_qc_app.main:main"
+dff-fit            = "baseline_search.run:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["base_qc_app*", "baseline_search*", "binit0_qc_app*"]
+include = ["base_qc_app*", "baseline_search*", "binit0_qc_app*", "production_qc_app*"]
