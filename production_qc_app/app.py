@@ -200,8 +200,8 @@ class ImagePanel(QWidget):
             sl.setFixedHeight(16)
         self._lo_sl.setValue(0)
         self._hi_sl.setValue(1000)
-        self._auto_btn = QPushButton("Auto (c)")
-        self._auto_btn.setFixedWidth(64)
+        self._auto_btn = QPushButton("Auto")
+        self._auto_btn.setFixedWidth(48)
         cgrid.addWidget(QLabel("Lo"), 0, 0)
         cgrid.addWidget(self._lo_sl, 0, 1)
         cgrid.addWidget(QLabel("Hi"), 1, 0)
@@ -489,8 +489,10 @@ class MainWindow(QMainWindow):
         save_row = QHBoxLayout()
         self.save_btn      = QPushButton("Save (S)")
         self.save_next_btn = QPushButton("Save + Next (Enter)")
+        self.capture_btn   = QPushButton("Capture (c)")
         self.save_btn.setFixedHeight(26)
         self.save_next_btn.setFixedHeight(26)
+        self.capture_btn.setFixedHeight(26)
         self.save_btn.setStyleSheet(
             "QPushButton { background-color: #2980b9; color: white; font-weight: bold; "
             "border-radius: 4px; padding: 3px 10px; } "
@@ -501,9 +503,15 @@ class MainWindow(QMainWindow):
             "border-radius: 4px; padding: 3px 10px; } "
             "QPushButton:hover { background-color: #1e8449; }"
         )
+        self.capture_btn.setStyleSheet(
+            "QPushButton { background-color: #6c3483; color: white; font-weight: bold; "
+            "border-radius: 4px; padding: 3px 10px; } "
+            "QPushButton:hover { background-color: #512e6c; }"
+        )
         save_row.addWidget(self.save_btn)
         save_row.addWidget(self.save_next_btn)
         save_row.addStretch()
+        save_row.addWidget(self.capture_btn)
         right_layout.addLayout(save_row)
 
         self.status_lbl = QLabel("")
@@ -524,6 +532,7 @@ class MainWindow(QMainWindow):
         self.next_btn.clicked.connect(lambda: self._step_roi(+1))
         self.save_btn.clicked.connect(self._save)
         self.save_next_btn.clicked.connect(self._save_and_next)
+        self.capture_btn.clicked.connect(self._capture)
 
     # ── session / plane selection ─────────────────────────────────────────────
 
@@ -661,6 +670,20 @@ class MainWindow(QMainWindow):
         self._save()
         self._step_roi(+1)
 
+    # ── capture ───────────────────────────────────────────────────────────────
+
+    def _capture(self):
+        if self._plane is None:
+            return
+        session_name = self.sess_combo.currentText()
+        out_dir = Path("/scratch/production_qc_captures")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        fname = f"{session_name}__{self._plane.plane_id}__roi{self._roi_idx:04d}.png"
+        path = out_dir / fname
+        pixmap = self.centralWidget().grab()
+        pixmap.save(str(path))
+        self.status_lbl.setText(f"Captured → {path}")
+
     # ── keyboard shortcuts ────────────────────────────────────────────────────
 
     def keyPressEvent(self, ev):
@@ -680,8 +703,10 @@ class MainWindow(QMainWindow):
             self.image_panel._zoom_in()
         elif key == Qt.Key_Equal:
             self.image_panel._zoom_out()
-        elif key == Qt.Key_C:
+        elif key == Qt.Key_C and ev.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier):
             self.image_panel._auto_contrast()
+        elif key == Qt.Key_C:
+            self._capture()
         elif key == Qt.Key_Q:
             self.dff_quality_bar.toggle(DFF_QUALITY_OPTIONS[0])
         elif key == Qt.Key_W:
