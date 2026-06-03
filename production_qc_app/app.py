@@ -602,8 +602,8 @@ class MainWindow(QMainWindow):
             self.validity_banner.setStyleSheet(_VALID_STYLE)
             self.validity_banner.setText("✔  VALID  —  soma ✓  |  not dendrite ✓  |  not border ✓")
             self.class_detail_lbl.setText(
-                f"soma prob: {plane.soma_pred[idx]}  |  "
-                f"dendrite prob: {plane.dendrite_pred[idx]}  |  "
+                f"soma pred: {plane.soma_pred[idx]}  |  "
+                f"dendrite pred: {plane.dendrite_pred[idx]}  |  "
                 f"border: {plane.border[idx]}"
             )
         else:
