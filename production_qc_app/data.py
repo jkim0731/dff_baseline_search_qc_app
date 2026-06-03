@@ -77,7 +77,7 @@ class PlaneData:
         return bool(np.isfinite(self.baseline[roi_idx, 0]))
 
 
-@lru_cache(maxsize=64)
+@lru_cache(maxsize=8)
 def load_plane(session_dir_str: str, plane_id: str) -> PlaneData:
     session_dir = Path(session_dir_str)
     plane_dir = session_dir / plane_id
