@@ -8,7 +8,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QFrame,
+    QButtonGroup, QCheckBox, QComboBox, QFrame,
     QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow,
     QPushButton, QSizePolicy, QSlider, QSplitter,
     QVBoxLayout, QWidget,
