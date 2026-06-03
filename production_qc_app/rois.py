@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 import numpy as np
+
+from .data import PlaneData
 
 from .data import PlaneData
 
