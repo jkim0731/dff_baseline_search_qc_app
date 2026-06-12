@@ -1,28 +1,44 @@
 # dFF Baseline Search App
 
-One folder for **running baseline fits** and **curating them**. Two top-level packages:
+One folder for **running baseline fits** and **curating them**. Four console commands:
 
-- `baseline_search/` — recipe-driven runner. A `recipe.json` declares how `x0`,
-  `sigma`, `bounds`, `M`, `model` and `fluctuations` are derived; the runner
-  resolves the recipe and applies `fit_baseline` per-ROI, writing
-  `F0trend_all.npy`, `F0_all.npy`, etc. to a numbered run folder.
-- `qc_app/` — interactive PyQt5 + pyqtgraph viewer. Compares any number of runs
-  side-by-side per ROI; auto-shows only recipe parameters that actually differ.
+| Command | Purpose |
+|---------|---------|
+| `dff-qc-explore` | Browse baseline fits across runs; label the best choice per ROI |
+| `dff-qc-detailed` | Inspect (c_pos, c_neg) noise-criterion winner per ROI across 8 combos |
+| `dff-qc-production` | QC production pipeline dFF output (h5 files) |
+| `dff-fit` | Run a baseline fit from a recipe JSON |
 
-The original `code/baseline_search/` package is preserved for notebooks that
-import it directly; the copy here keeps run + QC together.
+## Install
 
-## Expected folder layout
+```bash
+pip install -e /dff_baseline_search_qc_app
+```
 
-The app assumes this structure:
+---
+
+## dff-qc-explore
+
+Browse corrected-F and dFF traces for each ROI, with up to 8 baseline overlays (short window, long window, F0trend, F0, plus up to 4 extra run slots). Label the best baseline choice. Optionally compare multiple numbered run folders side-by-side.
+
+```bash
+dff-qc-explore
+```
+
+A folder picker appears — select the **inputs folder** (the one containing per-session subfolders with `F_all_array.npy`). Its parent is automatically scanned for numbered run folders.
+
+**Keyboard shortcuts:** `J`/`K` prev/next ROI · `1`–`8` toggle traces · `S` save · `Space` save+next · `R` toggle compare panel · `M` mask · `Z` zoom/FOV · `C` capture
+
+![dff-qc-explore](docs/screenshots/dff_qc_explore.png)
+
+### Expected data layout
 
 ```
-<runs_root>/               ← the parent; auto-detected from your inputs choice
-    index.csv              ← written by the runner; one row per run
-    0001_first_try/        ← numbered run folders
+<runs_root>/
+    index.csv
+    0001_first_try/          ← numbered run folders (optional, for compare)
     0002_cpos3_cneg3/
-    ...
-    first_try/             ← pick THIS as the inputs folder in the GUI
+    first_try/               ← pick THIS as the inputs folder
         755252_2024-11-12/
             F_all_array.npy
             timestamps.npy
@@ -32,62 +48,85 @@ The app assumes this structure:
             F0_all.npy
             F_noise.npy  F_snr.npy  F_skewness.npy
             bleaching_metric.npy  sustained_metric.npy
-            sczdrift_df_all.csv          (optional — ROI metadata)
             <plane_id>_mean_img.npy
             <plane_id>_max_img.npy
             <plane_id>_roi_table.pkl
-        755252_2024-11-19/
-            ...
 ```
 
-**The inputs folder** is the one that contains per-session subfolders (each
-with `F_all_array.npy`). Its **parent** is automatically treated as the runs
-root and is scanned for `index.csv` + numbered run folders.
+Output: `curation.csv` in the inputs folder (or `~/dff_baseline_qc_curation.csv` if read-only).
 
-> Example: if you pick `/results/runs/first_try/` as the inputs folder, the
-> app will look for runs in `/results/runs/`.
+---
 
-## QC the fits
+## dff-qc-detailed
+
+For each ROI, shows the noise-criterion bar chart comparing all 8 (c_pos, c_neg) combinations. The winner (combo whose `|median(negative residuals)|` is closest to `0.674 σ_noise`) is highlighted in gold. Toggle `V` to decompose the trend into components (b_inf, b_slow, b_fast, b_bright).
 
 ```bash
-cd code/dff_baseline_search_qc_app
-python main.py
+dff-qc-detailed
+# or with explicit paths:
+dff-qc-detailed --runs_dir /path/to/runs_root --output /path/to/curation.csv
+# with a pre-selected ROI list:
+dff-qc-detailed --runs_dir /path/to/runs_root --roi_list /path/to/roi_list.csv
 ```
 
-A single folder picker appears — select the **inputs folder** (e.g.
-`/results/runs/first_try/`). The app then:
+The `--runs_dir` must contain 8 numbered run folders (one per combo). If omitted, a folder picker appears.
 
-1. Lists all session subfolders found inside it.
-2. Automatically scans the parent directory for run folders and populates the
-   compare panel.
+**Keyboard shortcuts:** `J`/`K` prev/next · `1`–`9`,`0` toggle traces · `V` components view · `Z` clear · `A` all · `H` home · `S` save · `Enter` save+next · `C` capture
 
-Compare panel features:
-- Check the runs you want to compare; the *Differences* table auto-shows only
-  recipe parameters that disagree across the checked runs.
-- Quick-assign maps the first N checked runs into slots 1..4 with one click.
-- When slots are assigned, the session dropdown is restricted to the
-  intersection of sessions present in every selected run.
+![dff-qc-detailed](docs/screenshots/dff_qc_detailed.png)
 
-Keyboard: `J` prev · `K` next · `S` save · `Space` save+next · `R` toggle
-compare mode · `1`–`4` toggle slot traces.
+**ROI list mode:** pass `--roi_list roi_list.csv` (columns: `session_key`, `roi_index`) to restrict navigation to a specific set of ROIs. `Enter`/`Space` walks the list; `J`/`K` still navigate per-session.
 
-## Run a fit
+Output: `binit0_qc_curation.csv` in the runs root (or path from `--output`), with columns: `noise_winner`, `visual_best`, `verdict`, `flag_*`, `notes`.
 
-From inside `code/dff_baseline_search_qc_app/`:
+---
+
+## dff-qc-production
+
+QC the output of the production dFF pipeline. Loads neuropil-corrected F, pre-computed baseline and dFF, and OASIS events from h5 files. Shows ROI classification (soma/dendrite/border) and lets you mark dFF quality and QC label per ROI.
 
 ```bash
-python -m baseline_search.run \
+dff-qc-production
+```
+
+Auto-discovers all `multiplane-ophys_*_processed_*` session folders under `/root/capsule/data`. No arguments needed.
+
+**Keyboard shortcuts:** `J`/`K` prev/next · `S` save · `Space` save+next · `C` capture
+
+![dff-qc-production](docs/screenshots/dff_qc_production.png)
+
+Output: `production_qc_curation.csv` with columns: `session`, `plane_id`, `roi_index`, `dff_quality`, `qc_label`.
+
+---
+
+## dff-fit
+
+Run a recipe-driven baseline fit over one or more sessions. Outputs numbered run folders with `F0trend_all.npy`, `F0_all.npy`, residuals, and metadata.
+
+```bash
+dff-fit \
     --recipe baseline_search/recipes/first_try.json \
     --inputs_dir /results/runs/first_try \
     --out /results/runs \
-    --slug first_try_replication \
-    --sessions 755252_2024-11-19
+    --slug my_run_name \
+    --sessions 755252_2024-11-12 755252_2024-11-19
 ```
 
-Outputs land in `/results/runs/0001_first_try_replication/` (auto-numbered)
-and a row is appended to `/results/runs/index.csv`.
+`--sessions` is comma-separated. Omit to process all sessions in `--inputs_dir`. Outputs land in `/results/runs/0001_my_run_name/` (auto-numbered) and a row is appended to `/results/runs/index.csv`.
 
-Available recipes in `baseline_search/recipes/`:
+**All options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--recipe` | *(required)* | Path to recipe JSON |
+| `--inputs_dir` | `/root/capsule/scratch/first_try` | Folder with per-session subfolders |
+| `--out` | `/root/capsule/scratch/runs` | Parent for numbered output folders |
+| `--slug` | *(required)* | Short name appended to run folder |
+| `--sessions` | *(required)* | Comma-separated session keys to fit |
+| `--n_jobs` | `-1` (all cores) | joblib parallelism |
+| `--description` | `""` | Written to `metadata.json` |
+
+**Available recipes** in `baseline_search/recipes/`:
 
 | File | c_pos | c_neg | fluctuations |
 |------|-------|-------|--------------|
@@ -100,12 +139,3 @@ Available recipes in `baseline_search/recipes/`:
 | `cpos4_cneg4_lowess.json` | 4 | 4 | lowess |
 | `cpos4_cneg5_lowess.json` | 4 | 5 | lowess |
 | `percentile_variant.json` | 3 | 3 | percentile |
-
-## Install
-
-```bash
-pip install -e .
-```
-
-This installs both `qc_app` and `baseline_search`, plus console scripts
-`dff-qc` (GUI) and `dff-fit` (runner).
