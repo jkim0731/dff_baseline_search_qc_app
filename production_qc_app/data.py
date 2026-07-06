@@ -40,6 +40,19 @@ def _get_fs(session_dir: Path, plane_id: str) -> float:
     return 10.71
 
 
+def _read_pred(f: h5py.File, group: str) -> h5py.Dataset:
+    """Read per-ROI predictions, tolerating the two naming schemes seen across
+    pipeline versions: ``<group>/predictions`` (older) and
+    ``<group>/roicat_predictions`` (newer)."""
+    for key in (f"{group}/predictions", f"{group}/roicat_predictions"):
+        if key in f:
+            return f[key]
+    raise KeyError(
+        f"No predictions dataset found for '{group}' in {f.filename}; "
+        f"tried 'predictions' and 'roicat_predictions'"
+    )
+
+
 @dataclass
 class PlaneData:
     session_dir: Path
@@ -104,8 +117,8 @@ def load_plane(session_dir_str: str, plane_id: str) -> PlaneData:
     with h5py.File(
         plane_dir / "classification" / f"{plane_id}_classification.h5", "r"
     ) as f:
-        soma_pred = np.array(f["soma/predictions"])
-        dendrite_pred = np.array(f["dendrites/predictions"])
+        soma_pred = np.array(_read_pred(f, "soma"))
+        dendrite_pred = np.array(_read_pred(f, "dendrites"))
         border = np.array(f["border/labels"])
 
     fs = _get_fs(session_dir, plane_id)
