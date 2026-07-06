@@ -466,6 +466,14 @@ class MainWindow(QMainWindow):
         )
         right_layout.addWidget(self.class_detail_lbl)
 
+        self.baseline_lbl = QLabel("")
+        self.baseline_lbl.setWordWrap(True)
+        self.baseline_lbl.setStyleSheet(
+            "QLabel { font-size: 9pt; color: #b35900; font-weight: bold; "
+            "padding: 2px 4px; }"
+        )
+        right_layout.addWidget(self.baseline_lbl)
+
         line2 = QFrame()
         line2.setFrameShape(QFrame.HLine)
         line2.setFrameShadow(QFrame.Sunken)
@@ -615,6 +623,8 @@ class MainWindow(QMainWindow):
                 f"dendrite pred={plane.dendrite_pred[idx]}  |  "
                 f"border={plane.border[idx]}"
             )
+
+        self.baseline_lbl.setText(plane.baseline_summary(idx))
 
         n = plane.n_rois
         self.roi_label.setText(f"{idx}  /  {n - 1}")

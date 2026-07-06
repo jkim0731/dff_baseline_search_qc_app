@@ -40,6 +40,27 @@ def _get_fs(session_dir: Path, plane_id: str) -> float:
     return 10.71
 
 
+def _load_baseline_logs(session_dir: Path, plane_id: str, n_rois: int) -> list[dict] | None:
+    """Load the per-ROI baseline-search log (``{plane}_dff_logs.json``).
+
+    Returns a list indexed by ROI (aligned to the ``roi`` field), or ``None`` if
+    the log is missing/unreadable. Each entry records the selected Tukey combo
+    (``winner_combo``), which search pass won, and per-combo scores."""
+    log_path = session_dir / plane_id / "dff" / f"{plane_id}_dff_logs.json"
+    if not log_path.exists():
+        return None
+    try:
+        records = json.loads(log_path.read_text())
+    except Exception:
+        return None
+    by_roi: list[dict | None] = [None] * n_rois
+    for rec in records:
+        i = rec.get("roi")
+        if isinstance(i, int) and 0 <= i < n_rois:
+            by_roi[i] = rec
+    return by_roi
+
+
 def _read_pred(f: h5py.File, group: str) -> h5py.Dataset:
     """Read per-ROI predictions, tolerating the two naming schemes seen across
     pipeline versions: ``<group>/predictions`` (older) and
@@ -71,10 +92,45 @@ class PlaneData:
     mean_img: np.ndarray       # (H, W) float32
     roi_coords: np.ndarray     # (3, n_px): [roi_idx, y, x]
     img_shape: tuple[int, int]
+    baseline_logs: list[dict] | None = None  # per-ROI baseline-search log, or None
 
     @property
     def timestamps(self) -> np.ndarray:
         return np.arange(self.n_frames, dtype=np.float32) / self.fs
+
+    def baseline_summary(self, roi_idx: int) -> str:
+        """One-line description of the baseline method selected for this ROI."""
+        if self.baseline_logs is None:
+            return "baseline log: file not found"
+        rec = self.baseline_logs[roi_idx]
+        if rec is None:
+            return f"baseline log: no record for ROI {roi_idx}"
+        combo = rec.get("winner_combo")
+        if combo and len(combo) >= 2:
+            combo_str = f"(c_pos, c_neg)=({combo[0]}, {combo[1]})"
+        else:
+            combo_str = "(c_pos, c_neg)=n/a"
+        parts = [combo_str]
+
+        w_pass = rec.get("winner_pass")
+        n_pass = rec.get("n_passes")
+        if w_pass is not None:
+            parts.append(f"pass {w_pass}/{n_pass}")
+
+        # winning score lives under pass{winner_pass}[<combo key>]["score"]
+        if combo and w_pass is not None:
+            key = "_".join(str(c) for c in combo)
+            pass_block = rec.get(f"pass{w_pass}") or {}
+            entry = pass_block.get(key) or {}
+            score = entry.get("score")
+            if isinstance(score, (int, float)):
+                parts.append(f"score {score:.2f}")
+
+        if rec.get("pass2_sigma_relax"):
+            parts.append("σ-relaxed")
+        if rec.get("fallback_engaged"):
+            parts.append("FALLBACK")
+        return "baseline: " + "  |  ".join(parts)
 
     def is_valid(self, roi_idx: int) -> tuple[bool, list[str]]:
         reasons: list[str] = []
@@ -122,6 +178,7 @@ def load_plane(session_dir_str: str, plane_id: str) -> PlaneData:
         border = np.array(f["border/labels"])
 
     fs = _get_fs(session_dir, plane_id)
+    baseline_logs = _load_baseline_logs(session_dir, plane_id, n_rois)
 
     return PlaneData(
         session_dir=session_dir,
@@ -140,4 +197,5 @@ def load_plane(session_dir_str: str, plane_id: str) -> PlaneData:
         mean_img=mean_img,
         roi_coords=roi_coords,
         img_shape=(img_h, img_w),
+        baseline_logs=baseline_logs,
     )
